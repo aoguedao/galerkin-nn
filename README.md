@@ -1,2 +1,3 @@
-# galerkin-nn
-My implementation of Galerkin Neural Networks
+# Galerkin Neural Networks
+
+Implementation of Galerkin Neural Networks (Ainsworth & Dong, 2021)
