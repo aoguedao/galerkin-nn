@@ -10,17 +10,18 @@ from flax import nnx
 
 import utils
 
-# class Count(nnx.Variable[nnx.A]):
-#   pass
 
-# %%
+class Count(nnx.Variable[nnx.A]):
+  pass
+
+
 class SingleLayer(nnx.Module):
 	"""
 	Single layer neural network with an activation function
 	"""
 	def __init__(self, dim_in: int, dim_out: int, activation: Callable, *, rngs: nnx.Rngs):
 		key = rngs.params()
-		# self.count = Count(jnp.array(0))
+		self.count = Count(jnp.array(0))
 		initializer = nnx.initializers.uniform(scale=1.0)
 		self.w = nnx.Param(initializer(key, (dim_in, dim_out)))
 		self.b = nnx.Param(jnp.zeros((dim_out,)))
@@ -28,7 +29,7 @@ class SingleLayer(nnx.Module):
 		self.dim_in, self.dim_out = dim_in, dim_out
 
 	def __call__(self, x):
-		# self.count.value += 1
+		self.count.value += 1
 		x = x @ self.w + self.b
 		x = self.activation(x)
 		return x
@@ -77,7 +78,7 @@ class GalerkinNN1D():
 		self.solution_tol = solution_tol
 		self.basis_tol = basis_tol
 		self.basis = []
-		self.u_list = [self.u0]
+		self.u_list = [self.u0]  #TODO: It has to be normalized!
 		self.error_eta_list = []
 		self.basis_losses = []
 		self.models = []
@@ -131,7 +132,7 @@ class GalerkinNN1D():
 		for _ in range(self.MAX_EPOCH):
 			loss, phi = train_step(model, optimizer)
 			losses.append(np.asarray(loss))
-			loss_relative = (loss - loss_prev) / loss_relative  # Stop criteria
+			loss_relative = (loss - loss_prev) / loss_relative  # Stop criteria, TODO: Be careful with the pick of Learning Rate
 			if loss_relative < self.basis_tol:
 				break
 			else:
@@ -229,17 +230,17 @@ class GalerkinNN1D():
 		Parameters
 		----------
 		u : Callable
-				_description_
+			_description_
 		v : Callable
-				_description_
+			_description_
 		d_u : Callable
-				_description_
+			_description_
 		d_v : Callable
-				_description_
+			_description_
 		X : ArrayLike
-				_description_
+			_description_
 		X_weights : ArrayLike
-				_description_
+			_description_
 
 		Returns
 		-------
@@ -323,22 +324,22 @@ class GalerkinNN1D():
 		Parameters
 		----------
 		u : Callable
-				_description_
+			_description_
 		phi : Callable
-				_description_
+			_description_
 		d_u : Callable
-				_description_
+			_description_
 		d_phi : Callable
-				_description_
+			_description_
 		X : ArrayLike
-				_description_
+			_description_
 		X_weights : ArrayLike
-				_description_
+			_description_
 
 		Returns
 		-------
 		_type_
-				_description_
+			_description_
 		"""
 		phi_norm = self.norm(v, d_v)
 		return self.residual(u, v, d_u, d_v, X, X_weights) / phi_norm
@@ -407,4 +408,8 @@ gnn = GalerkinNN1D(
 	solution_tol=solution_tol,
 	basis_tol=basis_tol,
 )
+
+gnn.subspace_construction()
 # %%
+import numpy as np
+x = np.arange(10)
