@@ -52,7 +52,8 @@ class GalerkinNN1D():
 		key,
 		max_basis: int=50,
 		solution_tol: float=1e-6,
-		basis_tol: float=1e-6
+		basis_tol: float=1e-6,
+		max_epoch: int=1_000
 	):
 		# PDE formulation
 		self.a, self.b = a, b
@@ -77,30 +78,40 @@ class GalerkinNN1D():
 		self.rngs = [nnx.Rngs({'params': subkey}) for subkey in self.keys]
 		self.solution_tol = solution_tol
 		self.basis_tol = basis_tol
+		self.max_epoch = max_epoch
 		self.basis = []
-		self.u_list = [self.u0]  #TODO: It has to be normalized!
+		self.u_list = [u_initial]
 		self.error_eta_list = []
 		self.basis_losses = []
 		self.models = []
+		self.i = 0
 
 
 	def subspace_construction(self):
-		self.i = 0
 		norm_u0 = self.norm(self.u0, self.d_u0)
-		self.basis[0] = lambda x: self.u0(x) / norm_u0
-		self.basis[1], self.error_eta_list[0] = self.augment_basis(self.u0)
+		self.basis.append(lambda x: self.u0(x) / norm_u0)  # Initial approximation
+
+		phi_nn, error_eta = self.augment_basis(self.u0)  # Augment basis
+		self.basis.append(phi_nn)
+		self.error_eta_list.append(error_eta)
 
 		self.i = 1
 		while (self.error_eta_list[-1] > self.tol) and (self.i <= self.max_basis):
 			i = self.i
-			self.u_list[i] = self.galerkin_solve(self.basis, self.bilinear, self.data)
-			self.basis[i + 1], self.error_eta_list[i] = self.augment_basis(self.u_list[i])
+			# Approx. solution
+			u = self.galerkin_solve(self.basis, self.bilinear, self.data)
+			# Augment basis
+			phi_nn, error_eta = self.augment_basis(self.u_list[i])
+			# Append to lists
+			self.u_list.append(u)
+			self.basis.append(phi_nn)
+			self.error_eta_list.append(error_eta)
 			self.i += 1
 
 
 	def augment_basis(self, u_prev):
 		activation_i = self.activations[self.i]
-		neurons_i = self.neurons_widths[self.i]
+		neurons_i = self.network_widths[self.i]
 		lr_i = self.learning_rates[self.i]
 		rngs_i = self.rngs[self.i]
 		model = SingleLayer(
@@ -124,12 +135,12 @@ class GalerkinNN1D():
 				loss = self.error_eta(u_prev, phi, d_u_prev, d_phi, self.X, self.X_weights)
 				return loss, phi
 
-			loss, grads = nnx.value_and_grad(loss_fn)(model)
+			loss, grads = nnx.value_and_grad(loss_fn)(model, self.X, self.X_weights)
 			optimizer.update(grads)
 			return loss, phi
 
 		# Training process
-		for _ in range(self.MAX_EPOCH):
+		for _ in range(self.max_epoch):
 			loss, phi = train_step(model, optimizer)
 			losses.append(np.asarray(loss))
 			loss_relative = (loss - loss_prev) / loss_relative  # Stop criteria, TODO: Be careful with the pick of Learning Rate
@@ -411,5 +422,3 @@ gnn = GalerkinNN1D(
 
 gnn.subspace_construction()
 # %%
-import numpy as np
-x = np.arange(10)
