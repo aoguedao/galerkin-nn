@@ -81,6 +81,7 @@ class GalerkinNN1D():
 		self.max_epoch = max_epoch
 		self.basis = []
 		self.u_list = [u_initial]
+		self.u_coeff_list = []
 		self.error_eta_list = []
 		self.basis_losses = []
 		self.models = []
@@ -90,7 +91,7 @@ class GalerkinNN1D():
 	def subspace_construction(self):
 		norm_u0 = self.norm(self.u0, self.d_u0)
 		self.basis.append(lambda x: self.u0(x) / norm_u0)  # Initial approximation
-
+		self.u_coeff_list.append([9999.99])  # TODO
 		phi_nn, error_eta = self.augment_basis(self.u0)  # Augment basis
 		self.basis.append(phi_nn)
 		self.error_eta_list.append(error_eta)
@@ -135,7 +136,8 @@ class GalerkinNN1D():
 				loss = self.error_eta(u_prev, phi, d_u_prev, d_phi, self.X, self.X_weights)
 				return loss, phi
 
-			loss, grads = nnx.value_and_grad(loss_fn)(model, self.X, self.X_weights)
+			grads_fn = nnx.value_and_grad(loss_fn, has_aux=True)
+			(loss, phi), grads = grads_fn(model, self.X, self.X_weights)
 			optimizer.update(grads)
 			return loss, phi
 
@@ -160,8 +162,8 @@ class GalerkinNN1D():
 
 	def galerkin_solve(self, bases, bilinear, data):
 		n_bases = len(bases)
-		K = np.zeros(shape=(n_bases, n_bases))
-		F = np.zeros(shape=(n_bases, 1))
+		K = jnp.zeros(shape=(n_bases, n_bases))
+		F = jnp.zeros(shape=(n_bases, 1))
 		for i in range(n_bases):
 			phi_i = bases[i]
 			d_phi_i = jax.grad(phi_i)
