@@ -190,21 +190,21 @@ def augment_basis(
 	loss_prev = 1e6
 
 	@nnx.jit
-	def train_step(model, optimizer):
-		def loss_fn(model, domain):
+	def train_step(optimizer, domain):
+		def loss_fn(model):
 			c = galerkin_lsq(u=u_prev, pde=pde, model=model, domain=domain)
 			phi = Function(lambda x: model(x) @ c)
 			loss = pde.error_eta(u=u_prev, v=phi, domain=domain)
 			return loss, phi
 
 		grads_fn = nnx.value_and_grad(loss_fn, has_aux=True, argnums=(0,))
-		(loss, phi), grads = grads_fn(model, domain)
+		(loss, phi), grads = grads_fn(optimizer.model)
 		optimizer.update(grads)
 		return loss, phi
 
 	# Training process
 	for _ in range(max_epoch):
-		loss, phi = train_step(model, optimizer)
+		loss, phi = train_step(optimizer, domain)
 		losses.append(np.asarray(loss))
 		loss_relative = (loss - loss_prev) / loss_relative  # Stop criteria, TODO: Be careful with the pick of Learning Rate
 		if loss_relative < tol_basis:
