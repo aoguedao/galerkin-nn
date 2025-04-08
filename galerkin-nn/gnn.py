@@ -147,25 +147,24 @@ def galerkin_solve(pde: PDEvar, domain: DomainNodes, bases: list[Function]) -> j
 
 def galerkin_lsq(
 		pde: PDEvar,
+		domain: DomainNodes,
 		u_prev: Function,
-		model: SingleLayer,
-		domain: DomainNodes
+		model: SingleLayer
 	) -> jax.Array:
 	neurons = model.dim_out
 	# model_dx = lambda x: jax.vmap(jax.jacobian(model))(x).squeeze(axis=-1)
-	K = np.zeros(shape=(neurons, neurons))
-	F = np.zeros(shape=(neurons, 1))
+	K = jnp.zeros(shape=(neurons, neurons))
+	F = jnp.zeros(shape=(neurons, 1))
 	sigmas = [Function(lambda x: model(x)[:, [i]]) for i in range(neurons)]
 	for i in range(neurons):
 		for j in range(i + 1):
 			K = K.at[i, j].set(pde.bilinear(u=sigmas[i], v=sigmas[j], domain=domain))
 		F = F.at[i, 0].set(
-			pde.linear(v=sigmas[i], domain=domain)
-			- pde.bilinear(u=u_prev, v=sigmas[i])
+			pde.linear(v=sigmas[i], domain=domain) - pde.bilinear(u=u_prev, v=sigmas[i], domain=domain)
 		)
 	K = K + K.T - jnp.diag(jnp.diag(K))  # Fill trian-upper entries
 	coeffs, _, _, _ = jnp.linalg.lstsq(K, F) # Get Galerkin coefficients
-	pass
+	return coeffs
 
 
 def augment_basis(
@@ -190,15 +189,15 @@ def augment_basis(
 	loss_prev = 1e6
 
 	@nnx.jit
-	def train_step(optimizer, domain):
+	def train_step(model):
 		def loss_fn(model):
-			c = galerkin_lsq(u=u_prev, pde=pde, model=model, domain=domain)
+			c = galerkin_lsq(u_prev=u_prev, pde=pde, model=model, domain=domain)
 			phi = Function(lambda x: model(x) @ c)
 			loss = pde.error_eta(u=u_prev, v=phi, domain=domain)
 			return loss, phi
 
 		grads_fn = nnx.value_and_grad(loss_fn, has_aux=True, argnums=(0,))
-		(loss, phi), grads = grads_fn(optimizer.model)
+		(loss, phi), grads = grads_fn(model)
 		optimizer.update(grads)
 		return loss, phi
 
@@ -206,7 +205,7 @@ def augment_basis(
 	for _ in range(max_epoch):
 		loss, phi = train_step(optimizer, domain)
 		losses.append(np.asarray(loss))
-		loss_relative = (loss - loss_prev) / loss_relative  # Stop criteria, TODO: Be careful with the pick of Learning Rate
+		loss_relative = (loss - loss_prev) / loss_relative  # Stop criteria, #TODO: Be careful with the pick of Learning Rate
 		if loss_relative < tol_basis:
 			break
 		else:
@@ -308,7 +307,7 @@ while (eta_errors[-1] > tol_solution) and (bstep <= max_basis):
 
 
 
-
+# %%
 # ----------------------
 # Playground
 # ----------------------
@@ -319,3 +318,32 @@ model = SingleLayer(
 	activation=jnp.tanh,
 	rngs=rng
 )
+# %%
+# Test galerkin_solve
+b1 = Function(lambda x: jnp.sin(x + 1) + x)
+b2 = Function(lambda x: jnp.cos(x))
+galerkin_solve(pde, domain, [b1, b2])
+
+# %%
+# Test galerkin_lsq
+galerkin_lsq(pde=pde, domain=domain, u_prev=u0, model=model)
+
+# %%
+# Test Augment Basis
+augment_basis(
+	pde=pde,
+	domain=domain,
+	u_prev=u0,
+	neurons=8,
+	activation=jnp.tanh,
+	learning_rate=0.01,
+	rng=rng,
+	max_epoch=max_epoch,
+)
+
+# %%
+def loss_fn(model, u_prev):
+	c = galerkin_lsq(u_prev=u_prev, pde=pde, model=model, domain=domain)
+	phi = Function(lambda x: model(x) @ c)
+	loss = pde.error_eta(u=u_prev, v=phi, domain=domain)
+	return loss, phi
