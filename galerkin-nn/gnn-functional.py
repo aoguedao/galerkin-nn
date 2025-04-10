@@ -16,7 +16,7 @@ def net_proj(X: jax.Array, params: optax.Params, coeff: jax.Array):
 	"""
 	Linear combination of the neural network
 	"""
-	assert X.shape[1] == coeff.shape[1]
+	# assert X.shape[1] == coeff.shape[1]
 	return jnp.dot(single_net(X=X, params=params), coeff)
 
 
@@ -39,10 +39,10 @@ def linear_op(f: jax.Array, v: jax.Array, XW: jax.Array) -> float:
 
 def bilinear_op(
 	u: jax.Array,
-	v: jax.Array,
 	du: jax.Array,
-	dv: jax.Array,
 	u_bdry: jax.Array,
+	v: jax.Array,
+	dv: jax.Array,
 	v_bdry: jax.Array,
 	XW: jax.Array,
 	XW_bdry: jax.Array
@@ -78,18 +78,19 @@ def norm(
 
 def residual(
 	u: jax.Array,
-	v: jax.Array,
 	du: jax.Array,
-	dv: jax.Array,
 	u_bdry: jax.Array,
+	v: jax.Array,
+	dv: jax.Array,
 	v_bdry: jax.Array,
+	f: jax.Array,
 	XW: jax.Array,
 	XW_bdry: jax.Array
 ) -> float:
 	"""
 	Residual L(v) - a(u, v)
 	"""
-	L_v = linear_op(f=source, v=v, XW=XW)
+	L_v = linear_op(f=f, v=v, XW=XW)
 	a_uv = bilinear_op(
 		u=u,
 		v=v,
@@ -105,11 +106,12 @@ def residual(
 
 def error_eta(
 	u: jax.Array,
-	v: jax.Array,
 	du: jax.Array,
-	dv: jax.Array,
 	u_bdry: jax.Array,
+	v: jax.Array,
+	dv: jax.Array,
 	v_bdry: jax.Array,
+	f: jax.Array,
 	XW: jax.Array,
 	XW_bdry: jax.Array
 ) -> float:
@@ -119,18 +121,18 @@ def error_eta(
 	norm_v = norm(
 		v=v,
 		dv=dv,
-		u_bdry=u_bdry,
 		v_bdry=v_bdry,
 		XW=XW,
 		XW_bdry=XW_bdry
 	)
 	res = residual(
 		u=u,
-		v=v,
 		du=du,
-		dv=dv,
 		u_bdry=u_bdry,
+		v=v,
+		dv=dv,
 		v_bdry=v_bdry,
+		f=f,
 		XW=XW,
 		XW_bdry=XW_bdry
 	)
@@ -143,15 +145,15 @@ def galerkin_solve():
 
 
 def galerkin_lsq(
-	net,
-	dnet,
-	net_bdry,
 	u,
 	du,
 	u_bdry,
+	net,
+	dnet,
+	net_bdry,
+	f,
 	XW,
 	XW_bdry,
-	f
 ):
 	# net, dnet shape (xnodes, neurons)
 	neurons = net.shape[1]
@@ -280,29 +282,133 @@ params_init = {
     'b': jax.random.normal(shape=(neurons, ), key=key_b),
 }
 
-optimizer = optax.adam(learning_rate=1e-2)
+# optimizer = optax.adam(learning_rate=1e-2)
+# params = params_init
+
+# net_train = single_net(params=params, X=X_train)
+# net_bdry = single_net(params=params, X=X_bdry)
+# dnet_train = jax.vmap(jax.jacobian(single_net, argnums=0), in_axes=(0, None))(X_train, params).squeeze(axis=-1)
+
+# v_nn_coeff = galerkin_lsq(
+# 	u=u_train,
+# 	du=du_train,
+# 	u_bdry=u_bdry,
+# 	net=net_train,
+# 	dnet=dnet_train,
+# 	net_bdry=net_bdry,
+# 	f=f_train,
+# 	XW=XW_train,
+# 	XW_bdry=XW_bdry,
+# )
+# v_nn_train = net_proj(X=X_train, params=params, coeff=v_nn_coeff)
+# v_nn_bdry = net_proj(X=X_bdry, params=params, coeff=v_nn_coeff)
+# dv_nn_train = jnp.dot(dnet_train, v_nn_coeff)
+
+# error = error_eta(
+# 	u=u_train,
+# 	du=du_train,
+# 	u_bdry=u_bdry,
+# 	v=v_nn_train,
+# 	dv=dv_nn_train,
+# 	v_bdry=v_nn_bdry,
+# 	f=f_train,
+# 	XW=XW_train,
+# 	XW_bdry=XW_bdry
+# )
+
+def loss_fn(
+	params: optax.Params,
+	u: jax.Array,
+	du: jax.Array,
+	u_bdry: jax.Array,
+	f: jax.Array,
+	X: jax.Array,
+	XW: jax.Array,
+	XW_bdry: jax.Array
+):
+	# Net with input layer and hidden layer
+	net = single_net(params=params, X=X)
+	net_bdry = single_net(params=params, X=X_bdry)
+	dnet = (
+		jax.vmap(
+			jax.jacobian(single_net, argnums=0),
+			in_axes=(0, None)
+		)(X, params)
+		.squeeze(axis=-1)
+	)
+	# Get output layer coefficients
+	v_nn_coeff = galerkin_lsq(
+		u=u,
+		du=du,
+		u_bdry=u_bdry,
+		net=net,
+		dnet=dnet,
+		net_bdry=net_bdry,
+		f=f,
+		XW=XW,
+		XW_bdry=XW_bdry,
+	)
+	v_nn = net_proj(X=X, params=params, coeff=v_nn_coeff)
+	v_nn_bdry = net_proj(X=X_bdry, params=params, coeff=v_nn_coeff)
+	dv_nn = jnp.dot(dnet, v_nn_coeff)
+	loss = error_eta(
+		u=u,
+		du=du,
+		u_bdry=u_bdry,
+		v=v_nn,
+		dv=dv_nn,
+		v_bdry=v_nn_bdry,
+		f=f,
+		XW=XW,
+		XW_bdry=XW_bdry
+	)
+	return -loss, v_nn_coeff
+
+@jax.jit
+def train_step(
+	params: optax.Params,
+	opt_state: tuple,
+	u: jax.Array,
+	du: jax.Array,
+	u_bdry: jax.Array,
+	f: jax.Array,
+	X: jax.Array,
+	XW: jax.Array,
+	XW_bdry: jax.Array,
+):
+	# optimizer is a global variable, I am not sure if this will impact
+    (loss, coeff), grads = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)(
+		params,
+		u,
+		du,
+		u_bdry,
+		f,
+		X,
+		XW,
+		XW_bdry
+	)
+    updates, opt_state = optimizer.update(grads, opt_state, params)
+    params = optax.apply_updates(params, updates)
+    return params, opt_state, loss, coeff
+
 params = params_init
-
-net_train = single_net(params=params, X=X_train)
-net_bdry = single_net(params=params, X=X_bdry)
-dnet_train = jax.vmap(jax.jacobian(single_net, argnums=0), in_axes=(0, None))(X_train, params).squeeze(axis=-1)
-
-v_nn_coeff = galerkin_lsq(
-	net=net_train,
-	dnet=dnet_train,
-	net_bdry=net_bdry,
-	u=u_train,
-	du=du_train,
-	u_bdry=u_bdry,
-	XW=XW_train,
-	XW_bdry=XW_bdry,
-	f=f_train
-)
-v_nn_train = net_proj(X=X_train, params=params, coeff=v_nn_coeff)
-
-for _ in range(max_epoch):
-	# TODO: TRAIN
-	pass
+optimizer = optax.adam(learning_rate=1e-2)
+opt_state = optimizer.init(params)
+for i in range(max_epoch):
+	params, opt_state, loss_value, coeff = train_step(
+		params=params,
+		opt_state=opt_state,
+		u=u_train,
+		du=du_train,
+		u_bdry=u_bdry,
+		f=f_train,
+		X=X_train,
+		XW=XW_train,
+		XW_bdry=XW_bdry
+	)
+	if i % 100 == 0:
+		print(f'step {i}, loss: {loss_value}')
+	break
 
 
 
@@ -321,3 +427,5 @@ for _ in range(max_epoch):
 
 
 
+
+# %%
