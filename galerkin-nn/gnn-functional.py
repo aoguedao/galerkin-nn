@@ -154,9 +154,46 @@ def error_eta(
 
 
 # Galerkin Schemes
-@jax.jit
-def galerkin_solve():
-	pass
+def galerkin_solve(
+	basis_params,
+	basis_coeffs,
+	activations,
+	f,
+	X,
+	X_bdry,
+	XW,
+	XW_bdry
+) -> jax.Array:
+	bases = {}
+	bases_bdry = {}
+	dbases = {}
+	n_bases = len(basis_params)
+	for i in range(n_bases):
+		params, coeff = basis_params[i], basis_coeffs[i]
+		activation = activations[i]
+		bases[i] = net_proj(X=X, params=params, activation=activation, coeff=coeff)
+		bases_bdry[i] = net_proj(X=X_bdry, params=params, activation=activation, coeff=coeff)
+		dbases[i] = dnet_proj(X, params, activation, coeff).squeeze(axis=-1)
+	K = jnp.zeros(shape=(n_bases, n_bases))
+	F = jnp.zeros(shape=(n_bases, 1))
+	for i in range(n_bases):
+		for j in range(i + 1):
+			K_ij = bilinear_op(
+				u=bases[i],
+				v=bases[j],
+				du=dbases[i],
+				dv=dbases[j],
+				u_bdry=bases_bdry[i],
+				v_bdry=bases_bdry[j],
+				XW=XW,
+				XW_bdry=XW_bdry
+			)
+			K = K.at[i, j].set(K_ij)
+		L_i = linear_op(f=f, v=bases[i], XW=XW)
+		F = F.at[i, 0].set(L_i)
+	K = K + K.T - jnp.diag(jnp.diag(K))
+	sol_coeff, _, _, _ = jnp.linalg.lstsq(K, F) # Get solution coefficients
+	return sol_coeff
 
 
 @jax.jit
@@ -234,7 +271,6 @@ def loss_fn(
 	)
 	v_nn = net_proj(X=X, params=params, activation=activation, coeff=v_nn_coeff)
 	v_nn_bdry = net_proj(X=X_bdry, params=params, activation=activation, coeff=v_nn_coeff)
-	# dv_nn = dnet_proj(X=X, params=params, activation=activation, coeff=v_nn_coeff).squeeze(axis=-1)
 	dv_nn = dnet_proj(X, params, activation, v_nn_coeff).squeeze(axis=-1)
 
 	loss = error_eta(
@@ -335,7 +371,6 @@ def augment_basis(
 	)
 	v_nn = net_proj(X=X, params=params, coeff=v_nn_coeff, activation=activation)
 	v_nn_bdry = net_proj(X=X_bdry, params=params, activation=activation, coeff=v_nn_coeff)
-	# dv_nn = dnet_proj(X=X, params=params, activation=activation, coeff=v_nn_coeff).squeeze(axis=-1)
 	dv_nn = dnet_proj(X, params, activation, v_nn_coeff).squeeze(axis=-1)
 	v_nn_norm = norm(v=v_nn, dv=dv_nn, v_bdry=v_nn_bdry, XW=XW, XW_bdry=XW_bdry)
 	# Basis \phi^{NN}
@@ -369,7 +404,7 @@ rho = 1.1
 n_domain = 32
 max_basis = 3
 network_widths = lambda i: N * r ** i
-activations = lambda i, x: jnp.tanh((i + 1) * x)
+# activations = lambda i, x: jnp.tanh((i + 1) * x)
 learning_rates = lambda i: A * rho ** (-i)
 max_epoch = 1_000
 tol_solution = 1e-6
@@ -442,50 +477,48 @@ basis_params.append(params)
 basis_coeffs.append(coeff)
 
 bstep = 1
-# while (eta_errors[-1] > tol_solution) and (bstep <= max_basis):
-# 	u_coeffs = galerkin_solve() # TODO
-# 	phi_nn, eta, params, coeff = augment_basis(u)
-# 	u_list.append(u)
-# 	bases.append(phi_nn)
-# 	eta_errors.append(eta)
-# 	bstep += 1
+activations = [jnp.tanh, jnp.tanh]
+while (eta_errors[-1] > tol_solution) and (bstep <= max_basis):
+	u_coeff = galerkin_solve(
+		basis_params,
+		basis_coeffs,
+		activations,
+		f_train,
+		X_train,
+		X_bdry,
+		XW_train,
+		XW_bdry,
+	)
+	u_train = None  # TODO
+	u_bdry = None  # TODO
+	du_train = None  # TODO
+	activation = None  # TODO
+	neurons = None  # TODO
+	learning_rate = None  # TODO
+
+	phi_nn, eta, params, coeff = augment_basis(
+		u=u_train,
+		du=du_train,
+		u_bdry=u_bdry,
+		f=f_train,
+		X=X_train,
+		XW=XW_train,
+		XW_bdry=XW_bdry,
+		activation=activation,
+		neurons=neurons,
+		learning_rate=learning_rate,
+		max_epoch=max_epoch,
+		key=key,
+	)
+	solution_coeffs.append(u_coeff)
+	eta_errors.append(eta)
+	basis_params.append(params)
+	basis_coeffs.append(coeff)
+	bstep += 1
+	break
+
 
 # %%
-# def galerkin_solve(
-# 	basis_params,
-# 	basis_coeffs,
-# 	activations,
-# 	f,
-# 	X,
-# 	XW,
-# 	XW_bdry
-# ) -> jax.Array:
-# 	bases = {}
-# 	bases_bdry = {}
-# 	dbases = {}
-# 	n_bases = len(basis_params)
-# 	for i in range(n_bases):
-# 		net = 
 
-# 	K = jnp.zeros(shape=(n_bases, n_bases))
-# 	F = jnp.zeros(shape=(n_bases, 1))
-# 	for i in range(n_bases):
-# 		for j in range(i + 1):
-# 			K_ij = bilinear_op(
-# 				u=bases[i],
-# 				v=bases[j],
-# 				du=dbases[i],
-# 				dv=dbases[j],
-# 				u_bdry=bases_bdry[i],
-# 				v_bdry=bases_bdry[j],
-# 				XW=XW,
-# 				XW_bdry=XW_bdry
-# 			)
-# 			K = K.at[i, j].set(K_ij)
-# 		L_i = linear_op(f=f, v=bases[i], XW=XW)
-# 		F = F.at[i, 0].set(L_i)
-# 	K = K + K.T - jnp.diag(jnp.diag(K))  # Fill trian-upper entries
-# 	coeff, _, _, _ = jnp.linalg.lstsq(K, F) # Get Galerkin coefficients
-# 	return coeff
 
 
