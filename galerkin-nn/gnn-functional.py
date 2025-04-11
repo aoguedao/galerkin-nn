@@ -156,11 +156,12 @@ def error_eta(
 
 
 def get_solution(
-	coeffs: jax.Array,
+	coeff: jax.Array,
 	bases: Sequence[jax.Array],
 ):
 	bases_matrix = jnp.concat(bases, axis=1)
-	return jnp.matmul(coeffs, bases_matrix)
+	return jnp.dot(bases_matrix, coeff)
+
 
 # Galerkin Schemes
 def galerkin_solve(
@@ -172,12 +173,6 @@ def galerkin_solve(
 	XW_bdry: jax.Array,
 ) -> jax.Array:
 	n_bases = len(bases_params)
-	# for i in range(n_bases):
-	# 	params, coeff = basis_params[i], basis_coeffs[i]
-	# 	activation = activations[i]
-	# 	bases[i] = net_proj(X=X, params=params, activation=activation, coeff=coeff)
-	# 	bases_bdry[i] = net_proj(X=X_bdry, params=params, activation=activation, coeff=coeff)
-	# 	dbases[i] = dnet_proj(X, params, activation, coeff).squeeze(axis=-1)
 	K = jnp.zeros(shape=(n_bases, n_bases))
 	F = jnp.zeros(shape=(n_bases, 1))
 	for i in range(n_bases):
@@ -499,6 +494,7 @@ dbases_train.append(dphi_nn)
 # Basis step loop
 bstep = 2
 while (eta_errors[-1] > tol_solution) and (bstep <= max_basis):
+	print(f"Basis: {bstep}")
 	u_coeff = galerkin_solve(
 		bases_train,
 		bases_bdry,
@@ -507,13 +503,15 @@ while (eta_errors[-1] > tol_solution) and (bstep <= max_basis):
 		XW_train,
 		XW_bdry,
 	)
-	u_train = None  # TODO
-	u_bdry = None  # TODO
-	du_train = None  # TODO
+	u_train = get_solution(u_coeff, bases=bases_train)
+	u_bdry = get_solution(u_coeff, bases=bases_bdry)
+	du_train = get_solution(u_coeff, bases=dbases_train)
+
 	activation = activations(bstep)
 	neurons = network_widths(bstep)
 	learning_rate = learning_rates(bstep)
-	key, _ = jax.random.split(key, n=2)
+	key, _ = jax.random.split(key, num=2)
+
 	phi_nn, phi_nn_bdry, dphi_nn, eta, params, coeff = augment_basis(
 		u=u_train,
 		du=du_train,
@@ -532,11 +530,7 @@ while (eta_errors[-1] > tol_solution) and (bstep <= max_basis):
 	eta_errors.append(eta)
 	bases_params.append(params)
 	bases_coeffs.append(coeff)
+	bases_train.append(phi_nn)
+	bases_bdry.append(phi_nn_bdry)
+	dbases_train.append(dphi_nn)
 	bstep += 1
-	break
-
-
-# %%
-
-
-
