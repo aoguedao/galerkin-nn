@@ -6,7 +6,7 @@ import optax
 
 from functools import partial
 from jaxtyping import PRNGKeyArray
-from typing import Callable
+from typing import Callable, Sequence, Tuple
 
 # Neural Network
 def single_net(
@@ -17,6 +17,7 @@ def single_net(
 	X = jnp.dot(X, params["W"]) + params["b"]
 	X = activation(X)
 	return X
+
 
 def net_proj(
 	X: jax.Array,
@@ -34,8 +35,9 @@ def net_proj(
 dsingle_net = jax.vmap(jax.jacobian(single_net, argnums=0), in_axes=(0, None, None))
 dnet_proj = jax.vmap(jax.jacobian(net_proj, argnums=0), in_axes=(0, None, None, None))
 
+
 # PDE
-def gauss_lengendre_quad(bounds: tuple, n: int) -> tuple[jax.Array, jax.Array]:
+def gauss_lengendre_quad(bounds: tuple, n: int) -> Tuple[jax.Array, jax.Array]:
 	a, b = bounds
 	x, w = np.polynomial.legendre.leggauss(deg=n)
 	x = 0.5 * (b - a) * x + 0.5 * (b + a)  # From [-1, 1] to [a, b]
@@ -153,27 +155,29 @@ def error_eta(
 	return res / norm_v
 
 
+def get_solution(
+	coeffs: jax.Array,
+	bases: Sequence[jax.Array],
+):
+	bases_matrix = jnp.concat(bases, axis=1)
+	return jnp.matmul(coeffs, bases_matrix)
+
 # Galerkin Schemes
 def galerkin_solve(
-	basis_params,
-	basis_coeffs,
-	activations,
-	f,
-	X,
-	X_bdry,
-	XW,
-	XW_bdry
+	bases: Sequence[jax.Array],
+	bases_bdry: Sequence[jax.Array],
+	dbases: Sequence[jax.Array],
+	f: jax.Array,
+	XW: jax.Array,
+	XW_bdry: jax.Array,
 ) -> jax.Array:
-	bases = {}
-	bases_bdry = {}
-	dbases = {}
-	n_bases = len(basis_params)
-	for i in range(n_bases):
-		params, coeff = basis_params[i], basis_coeffs[i]
-		activation = activations[i]
-		bases[i] = net_proj(X=X, params=params, activation=activation, coeff=coeff)
-		bases_bdry[i] = net_proj(X=X_bdry, params=params, activation=activation, coeff=coeff)
-		dbases[i] = dnet_proj(X, params, activation, coeff).squeeze(axis=-1)
+	n_bases = len(bases_params)
+	# for i in range(n_bases):
+	# 	params, coeff = basis_params[i], basis_coeffs[i]
+	# 	activation = activations[i]
+	# 	bases[i] = net_proj(X=X, params=params, activation=activation, coeff=coeff)
+	# 	bases_bdry[i] = net_proj(X=X_bdry, params=params, activation=activation, coeff=coeff)
+	# 	dbases[i] = dnet_proj(X, params, activation, coeff).squeeze(axis=-1)
 	K = jnp.zeros(shape=(n_bases, n_bases))
 	F = jnp.zeros(shape=(n_bases, 1))
 	for i in range(n_bases):
@@ -316,6 +320,7 @@ def train_step(
     params = optax.apply_updates(params, updates)
     return params, opt_state, loss, coeff
 
+
 def augment_basis(
 	u: jax.Array,
 	du: jax.Array,
@@ -390,7 +395,8 @@ def augment_basis(
 		XW_bdry=XW_bdry
 	)
 
-	return phi_nn, eta, params, coeff
+	return phi_nn, phi_nn_bdry, dphi_nn, eta, params, coeff
+
 
 # %%
 # Data
@@ -403,12 +409,17 @@ A = 0.01
 rho = 1.1
 n_domain = 32
 max_basis = 3
-network_widths = lambda i: N * r ** i
-# activations = lambda i, x: jnp.tanh((i + 1) * x)
-learning_rates = lambda i: A * rho ** (-i)
+network_widths = lambda i: N * r ** (i - 1)
+learning_rates = lambda i: A * rho ** (-(i - 1))
+beta_i = lambda i: i
 max_epoch = 1_000
 tol_solution = 1e-6
 tol_basis = 1e-6
+
+def activations(beta_i):
+	def activation(x):
+		return jnp.tanh(beta_i * x)
+	return activation
 
 # Domain
 xa, xb = 0.0, 1.0
@@ -431,34 +442,39 @@ du0 = lambda x: jnp.zeros_like(x)
 
 # %%
 # ----------------------
-# Algorithm starts here
-# ----------------------
 # Subspace construction
+# ----------------------
+eta_errors = []  # Remember, for eta_i we need phi_{i+1}^{NN}
+solution_coeffs = []
+bases_params = []
+bases_coeffs = []
+bases_train = []  # phi_i^{NN}(X_train)
+bases_bdry = []
+dbases_train = []
+
 
 f_train = source(X_train)
 u_train = u0(X_train)
 du_train = du0(X_train)
 u_bdry = u0(X_bdry)
-u_norm = norm(v=u_train, dv=du_train, v_bdry=u_bdry, XW=XW_train, XW_bdry=X_bdry)
+u_norm = norm(v=u_train, dv=du_train, v_bdry=u_bdry, XW=XW_train, XW_bdry=XW_bdry)
+phi_nn_0 = u_train / u_norm if u_norm != 0 else u_train
+phi_nn_0_bdry = u_bdry / u_norm if u_norm != 0 else u_bdry
+dphi_nn_0 = du_train / u_norm if u_norm != 0 else du_train
 
-if u_norm == 0:
-	bases = [u_train]
-else:
-	bases = [u_train / u_norm]
-u_coeffs = [jnp.array([1.0])]
+bases_train.append(phi_nn_0)
+bases_bdry.append(phi_nn_0_bdry)
+dbases_train.append(dphi_nn_0)
 
-# --------------------------------------
-# WORK IN PROGRESS
-# --------------------------------------
-activation = jnp.tanh
-neurons = 4
-learning_rate = 1e-3
+solution_coeffs.append(jnp.array([1.0]))
+bases_params.append(None)  # There are no NN Weights and Biases for phi_0^{NN}
+bases_coeffs.append(None)  # There are no NN Coefficients for phi_0^{NN}
 
-basis_params = []
-basis_coeffs = []
-solution_coeffs = []
-
-phi_nn, eta, params, coeff = augment_basis(
+# First basis step
+activation = activations(1)
+neurons = network_widths(1)
+learning_rate = learning_rates(1)
+phi_nn, phi_nn_bdry, dphi_nn, eta, params, coeff = augment_basis(
 	u=u_train,
 	du=du_train,
 	u_bdry=u_bdry,
@@ -470,33 +486,35 @@ phi_nn, eta, params, coeff = augment_basis(
 	neurons=neurons,
 	learning_rate=learning_rate,
 	max_epoch=max_epoch,
-	key=key,
+	key=key
 )
-eta_errors = [eta]
-basis_params.append(params)
-basis_coeffs.append(coeff)
+eta_errors.append(eta)
+bases_params.append(params)
+bases_coeffs.append(coeff)
+bases_train.append(phi_nn)
+bases_bdry.append(phi_nn_bdry)
+dbases_train.append(dphi_nn)
 
-bstep = 1
-activations = [jnp.tanh, jnp.tanh]
+# %%
+# Basis step loop
+bstep = 2
 while (eta_errors[-1] > tol_solution) and (bstep <= max_basis):
 	u_coeff = galerkin_solve(
-		basis_params,
-		basis_coeffs,
-		activations,
+		bases_train,
+		bases_bdry,
+		dbases_train,
 		f_train,
-		X_train,
-		X_bdry,
 		XW_train,
 		XW_bdry,
 	)
 	u_train = None  # TODO
 	u_bdry = None  # TODO
 	du_train = None  # TODO
-	activation = None  # TODO
-	neurons = None  # TODO
-	learning_rate = None  # TODO
-
-	phi_nn, eta, params, coeff = augment_basis(
+	activation = activations(bstep)
+	neurons = network_widths(bstep)
+	learning_rate = learning_rates(bstep)
+	key, _ = jax.random.split(key, n=2)
+	phi_nn, phi_nn_bdry, dphi_nn, eta, params, coeff = augment_basis(
 		u=u_train,
 		du=du_train,
 		u_bdry=u_bdry,
@@ -512,8 +530,8 @@ while (eta_errors[-1] > tol_solution) and (bstep <= max_basis):
 	)
 	solution_coeffs.append(u_coeff)
 	eta_errors.append(eta)
-	basis_params.append(params)
-	basis_coeffs.append(coeff)
+	bases_params.append(params)
+	bases_coeffs.append(coeff)
 	bstep += 1
 	break
 
