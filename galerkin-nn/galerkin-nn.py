@@ -173,7 +173,7 @@ def galerkin_solve(
 	XW: jax.Array,
 	XW_bdry: jax.Array,
 ) -> jax.Array:
-	n_bases = len(bases_params)
+	n_bases = len(bases)
 	K = jnp.zeros(shape=(n_bases, n_bases))
 	F = jnp.zeros(shape=(n_bases, 1))
 	for i in range(n_bases):
@@ -288,7 +288,7 @@ def loss_fn(
 	return -loss, v_nn_coeff
 
 
-@partial(jax.jit, static_argnums=(0, 10))
+@partial(jax.jit, static_argnums=(0, 11))
 def train_step(
 	optimizer: optax.GradientTransformation,
 	opt_state: optax.OptState,
@@ -303,7 +303,7 @@ def train_step(
 	XW_bdry: jax.Array,
 	activation: Callable[[jax.Array], jax.Array],
 ):
-    (loss, coeff), grads = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)(
+		(loss, coeff), grads = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)(
 		params,
 		u,
 		du,
@@ -315,11 +315,11 @@ def train_step(
 		XW_bdry,
 		activation
 	)
-    updates, opt_state = optimizer.update(grads, opt_state, params)
-    params = optax.apply_updates(params, updates)
-    return opt_state, params, loss, coeff
+		updates, opt_state = optimizer.update(grads, opt_state, params)
+		params = optax.apply_updates(params, updates)
+		return opt_state, params, -loss, coeff
 
-@partial(jax.jit, static_argnums=(8,))
+
 def augment_basis(
 	u: jax.Array,
 	du: jax.Array,
@@ -333,6 +333,7 @@ def augment_basis(
 	neurons: int,
 	learning_rate: float,
 	max_epoch: int,
+	tol_basis: float,
 	key: PRNGKeyArray,
 ):
 	optimizer = optax.adam(learning_rate=learning_rate)
@@ -359,6 +360,9 @@ def augment_basis(
 		)
 		if i % 100 == 0:
 			print(f'step {i}, loss: {loss}')
+		if jnp.abs(loss) < tol_basis:
+			# TODO: Implement a better stopper.
+			break
 
 	# Get the final basis
 	net = single_net(X=X, params=params, activation=activation)
@@ -394,130 +398,66 @@ def augment_basis(
 		XW=XW,
 		XW_bdry=XW_bdry
 	)
-
 	return phi_nn, phi_nn_bdry, dphi_nn, eta, params, coeff
 
 
-# %%
-# Data
-seed = 42
-key = jax.random.key(seed)
+def adaptive_subspace(
+	xbounds: Tuple[float, float],
+	source: Callable[[jax.Array], jax.Array],
+	u0: Callable[[jax.Array], jax.Array],
+	du0: Callable[[jax.Array], jax.Array],
+	n_train: int,
+	n_val: int,
+	activations_fn: Callable[[int], Callable[[jax.Array], jax.Array]],
+	network_widths_fn: Callable[[int], int],
+	learning_rates_fn: Callable[[int], float],
+	max_bases: int = 8,
+	max_epoch_basis: int = 5_000,
+	tol_solution: float = 1e-8,
+	tol_basis: float = 1e-6,
+	seed: int = 42
+):
 
-N = 5
-r = 1
-A = 0.01
-rho = 1.1
-n_domain = 32
-max_basis = 3
+	# Generate data
+	key = jax.random.key(seed)
+	xa, xb = xbounds
+	X_train, XW_train = gauss_lengendre_quad((xa, xb), n_train)
+	X_val, XW_val = gauss_lengendre_quad((xa, xb), n_val)
+	X_bdry = jnp.array([xa, xb], dtype=float).reshape(-1, 1)
+	XW_bdry = jnp.array([2.0, 1.0]).reshape(-1, 1)  # Hardcoded for now
+	f_train = source(X_train)
 
-max_epoch = 1_000
-tol_solution = 1e-6
-tol_basis = 1e-6
+	eta_errors = []  # Remember, for $\eta_i$ we need $\phi_{i+1}^{NN}$
+	solution_coeffs = []
+	bases_params = []
+	bases_coeffs = []
+	bases_train = []  # $\phi_i^{NN}(X_train)$
+	bases_bdry = []
+	dbases_train = []
 
-get_network_width = lambda i: N * r ** (i - 1)
-get_learning_rate = lambda i: A * rho ** (-(i - 1))
-get_beta = lambda i: i
-def get_activation(beta_i):
-	def activation(x):
-		return jnp.tanh(beta_i * x)
-	return activation
+	# Zero basis
+	print(f"Basis: 0")
+	u_train = u0(X_train)
+	du_train = du0(X_train)
+	u_bdry = u0(X_bdry)
+	u_norm = norm(v=u_train, dv=du_train, v_bdry=u_bdry, XW=XW_train, XW_bdry=XW_bdry)
+	phi_nn_0 = u_train / u_norm if u_norm != 0 else u_train
+	phi_nn_0_bdry = u_bdry / u_norm if u_norm != 0 else u_bdry
+	dphi_nn_0 = du_train / u_norm if u_norm != 0 else du_train
 
-# Domain
-xa, xb = 0.0, 1.0
-n_train = 32
-n_val = 20
-X_train, XW_train = gauss_lengendre_quad((xa, xb), n_train)
-X_val, XW_val = gauss_lengendre_quad((xa, xb), n_val)
-X_bdry = jnp.array([xa, xb], dtype=float).reshape(-1, 1)
-XW_bdry = jnp.array([2.0, 1.0]).reshape(-1, 1)  # Hardcoded for now
+	bases_train.append(phi_nn_0)
+	bases_bdry.append(phi_nn_0_bdry)
+	dbases_train.append(dphi_nn_0)
 
-# PDE
-def source(X: jax.Array) -> jax.Array:
-	f1 = (2 * jnp.pi) ** 2 * jnp.sin(2 * jnp.pi * X)
-	f2 = (4 * jnp.pi) ** 2 * jnp.sin(4 * jnp.pi * X)
-	f3 = (6 * jnp.pi) ** 2 * jnp.sin(6 * jnp.pi * X)
-	return f1 + f2 + f3
+	solution_coeffs.append(jnp.array([1.0]))
+	bases_params.append(None)  # There are no NN Weights and Biases for $\phi_0^{NN}$
+	bases_coeffs.append(None)  # There are no NN Coefficients for $\phi_0^{NN}$
 
-u0 = lambda x: jnp.zeros_like(x)
-du0 = lambda x: jnp.zeros_like(x)
-
-# %%
-# ----------------------
-# Subspace construction
-# ----------------------
-eta_errors = []  # Remember, for $\eta_i$ we need $\phi_{i+1}^{NN}$
-solution_coeffs = []
-bases_params = []
-bases_coeffs = []
-bases_train = []  # $\phi_i^{NN}(X_train)$
-bases_bdry = []
-dbases_train = []
-
-
-f_train = source(X_train)
-u_train = u0(X_train)
-du_train = du0(X_train)
-u_bdry = u0(X_bdry)
-u_norm = norm(v=u_train, dv=du_train, v_bdry=u_bdry, XW=XW_train, XW_bdry=XW_bdry)
-phi_nn_0 = u_train / u_norm if u_norm != 0 else u_train
-phi_nn_0_bdry = u_bdry / u_norm if u_norm != 0 else u_bdry
-dphi_nn_0 = du_train / u_norm if u_norm != 0 else du_train
-
-bases_train.append(phi_nn_0)
-bases_bdry.append(phi_nn_0_bdry)
-dbases_train.append(dphi_nn_0)
-
-solution_coeffs.append(jnp.array([1.0]))
-bases_params.append(None)  # There are no NN Weights and Biases for $\phi_0^{NN}$
-bases_coeffs.append(None)  # There are no NN Coefficients for $\phi_0^{NN}$
-
-# First basis step
-activation = get_activation(1)
-neurons = get_network_width(1)
-learning_rate = get_learning_rate(1)
-phi_nn, phi_nn_bdry, dphi_nn, eta, params, coeff = augment_basis(
-	u=u_train,
-	du=du_train,
-	u_bdry=u_bdry,
-	f=f_train,
-	X=X_train,
-	XW=XW_train,
-	XW_bdry=XW_bdry,
-	activation=activation,
-	neurons=neurons,
-	learning_rate=learning_rate,
-	max_epoch=max_epoch,
-	key=key
-)
-eta_errors.append(eta)
-bases_params.append(params)
-bases_coeffs.append(coeff)
-bases_train.append(phi_nn)
-bases_bdry.append(phi_nn_bdry)
-dbases_train.append(dphi_nn)
-
-# %%
-# Basis step loop
-bstep = 2
-while (eta_errors[-1] > tol_solution) and (bstep <= max_basis):
-	print(f"Basis: {bstep}")
-	u_coeff = galerkin_solve(
-		bases_train,
-		bases_bdry,
-		dbases_train,
-		f_train,
-		XW_train,
-		XW_bdry,
-	)
-	u_train = solution_proj(u_coeff, bases=bases_train)
-	u_bdry = solution_proj(u_coeff, bases=bases_bdry)
-	du_train = solution_proj(u_coeff, bases=dbases_train)
-
-	activation = get_activation(bstep)
-	neurons = get_network_width(bstep)
-	learning_rate = get_learning_rate(bstep)
-	key, _ = jax.random.split(key, num=2)
-
+	# First basis step
+	print(f"Basis: 1")
+	activation = activations_fn(1)
+	neurons = network_widths_fn(1)
+	learning_rate = learning_rates_fn(1)
 	phi_nn, phi_nn_bdry, dphi_nn, eta, params, coeff = augment_basis(
 		u=u_train,
 		du=du_train,
@@ -530,14 +470,129 @@ while (eta_errors[-1] > tol_solution) and (bstep <= max_basis):
 		activation=activation,
 		neurons=neurons,
 		learning_rate=learning_rate,
-		max_epoch=max_epoch,
-		key=key,
+		max_epoch=max_epoch_basis,
+		tol_basis=tol_basis,
+		key=key
 	)
-	solution_coeffs.append(u_coeff)
 	eta_errors.append(eta)
 	bases_params.append(params)
 	bases_coeffs.append(coeff)
 	bases_train.append(phi_nn)
 	bases_bdry.append(phi_nn_bdry)
 	dbases_train.append(dphi_nn)
-	bstep += 1
+
+	# %%
+	# Basis step loop
+	bstep = 2
+	while (eta_errors[-1] > tol_solution) and (bstep <= max_bases):
+		print(f"Basis: {bstep}")
+		u_coeff = galerkin_solve(
+			bases_train,
+			bases_bdry,
+			dbases_train,
+			f_train,
+			XW_train,
+			XW_bdry,
+		)
+		u_train = solution_proj(u_coeff, bases=bases_train)
+		u_bdry = solution_proj(u_coeff, bases=bases_bdry)
+		du_train = solution_proj(u_coeff, bases=dbases_train)
+
+		activation = activations_fn(bstep)
+		neurons = network_widths_fn(bstep)
+		learning_rate = learning_rates_fn(bstep)
+		key, _ = jax.random.split(key, num=2)
+
+		phi_nn, phi_nn_bdry, dphi_nn, eta, params, coeff = augment_basis(
+			u=u_train,
+			du=du_train,
+			u_bdry=u_bdry,
+			f=f_train,
+			X=X_train,
+			X_bdry=X_bdry,
+			XW=XW_train,
+			XW_bdry=XW_bdry,
+			activation=activation,
+			neurons=neurons,
+			learning_rate=learning_rate,
+			max_epoch=max_epoch_basis,
+			tol_basis=tol_basis,
+			key=key,
+		)
+		solution_coeffs.append(u_coeff)
+		eta_errors.append(eta)
+		bases_params.append(params)
+		bases_coeffs.append(coeff)
+		bases_train.append(phi_nn)
+		bases_bdry.append(phi_nn_bdry)
+		dbases_train.append(dphi_nn)
+		bstep += 1
+
+	return (
+		eta_errors,
+		solution_coeffs,
+		bases_params,
+		bases_coeffs,
+		bases_train,
+		bases_bdry,
+		dbases_train
+	)
+
+# %%
+# PDE
+xbounds = 0.0, 1.0
+def source(X: jax.Array) -> jax.Array:
+	f1 = (2 * jnp.pi) ** 2 * jnp.sin(2 * jnp.pi * X)
+	f2 = (4 * jnp.pi) ** 2 * jnp.sin(4 * jnp.pi * X)
+	f3 = (6 * jnp.pi) ** 2 * jnp.sin(6 * jnp.pi * X)
+	return f1 + f2 + f3
+u0 = lambda X: jnp.zeros_like(X)
+du0 = lambda X: jnp.zeros_like(X)
+
+# NN
+n_train = 32
+n_val = 20
+N = 5
+r = 1
+A = 0.01
+rho = 1.1
+
+beta_fn = lambda i: i
+def activations_fn(beta_i):
+	def activation(x):
+		return jnp.tanh(beta_i * x)
+	return activation
+
+network_widths_fn = lambda i: N * r ** (i - 1)
+learning_rates_fn = lambda i: A * rho ** (-(i - 1))
+
+max_bases = 3
+max_epoch_basis = 1_000
+tol_solution = 1e-6
+tol_basis = 1e-6
+seed = 42
+
+(
+	eta_errors,
+	solution_coeffs,
+	bases_params,
+	bases_coeffs,
+	bases_train,
+	bases_bdry,
+	dbases_train
+) = adaptive_subspace(
+	xbounds=xbounds,
+	source=source,
+	u0=u0,
+	du0=du0,
+	n_train=n_train,
+	n_val=n_val,
+	activations_fn=activations_fn,
+	network_widths_fn=network_widths_fn,
+	learning_rates_fn=learning_rates_fn,
+	max_bases=max_bases,
+	max_epoch_basis=max_epoch_basis,
+	tol_solution=tol_solution,
+	tol_basis=tol_basis,
+	seed=seed,
+)
