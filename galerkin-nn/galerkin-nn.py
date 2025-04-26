@@ -5,6 +5,7 @@ import numpy as np
 import optax
 
 from functools import partial
+from jax import lax
 from jaxtyping import PRNGKeyArray
 from typing import Callable, Sequence, Tuple
 
@@ -210,35 +211,36 @@ def galerkin_lsq(
 ) -> jax.Array:
 	# net and dnets shape (xnodes, neurons)
 	n_neurons = net.shape[1]
-	K = jnp.zeros(shape=(n_neurons, n_neurons))
-	F = jnp.zeros(shape=(n_neurons, 1))
-	for i in range(n_neurons):
-		for j in range(i + 1):
-			K_ij = bilinear_op(
-				u=net[:, [i]],
-				v=net[:, [j]],
-				du=dnet[:, [i]],
-				dv=dnet[:, [j]],
-				u_bdry=net_bdry[:, [i]],
-				v_bdry=net_bdry[:, [j]],
-				XW=XW,
-				XW_bdry=XW_bdry
-			)
-			K = K.at[i, j].set(K_ij)
-		L_i = linear_op(f=f, v=net[:, [i]], XW=XW)
-		a_i = bilinear_op(
-				u=u,
-				v=net[:, [i]],
-				du=du,
-				dv=dnet[:, [i]],
-				u_bdry=u_bdry,
-				v_bdry=net_bdry[:, [i]],
-				XW=XW,
-				XW_bdry=XW_bdry
-			)
-		F = F.at[i, 0].set(L_i - a_i)
-	K = K + K.T - jnp.diag(jnp.diag(K))  # Fill trian-upper entries
-	coeff, _, _, _ = jnp.linalg.lstsq(K, F) # Get Galerkin coefficients
+	
+	def bilinear_vmap(j, v, dv, vb):
+		# Fix test function (column i), and vectorize over trial functions (j ≤ i)
+		def bilinear_j(u_j, du_j, ub_j):
+			return bilinear_op(u_j, du_j, ub_j, v, dv, vb, XW, XW_bdry)
+		return jax.vmap(bilinear_j, in_axes=1)(net[:, :j+1], dnet[:, :j+1], net_bdry[:, :j+1])
+	
+	def row_fn(i, K):
+		v = net[:, i:i+1]
+		dv = dnet[:, i:i+1]
+		vb = net_bdry[:, i:i+1]
+		K_row_vals = bilinear_vmap(i, v, dv, vb)
+		K = K.at[i, :i+1].set(K_row_vals)
+		return K, None
+
+	K_init = jnp.zeros(shape=(n_neurons, n_neurons))
+	K, _ = lax.scan(row_fn, K_init, jnp.arange(n_neurons))
+	K = jnp.tril(K) + jnp.tril(K, -1).T  # Symmetrize
+
+  # Vectorized RHS
+	def rhs_i(i):
+		v = net[:, i:i+1]
+		dv = dnet[:, i:i+1]
+		vb = net_bdry[:, i:i+1]
+		L_i = linear_op(f, v, XW)
+		a_i = bilinear_op(u, du, u_bdry, v, dv, vb, XW, XW_bdry)
+		return L_i - a_i
+	
+	F = jax.vmap(rhs_i)(jnp.arange(n_neurons)).reshape(-1, 1)
+	coeff, _, _, _ = jnp.linalg.lstsq(K, F)
 	return coeff
 
 
