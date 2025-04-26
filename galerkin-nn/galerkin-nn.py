@@ -65,7 +65,7 @@ def bilinear_op(
 ) -> float:
 	a1 = inner_product(u=du, v=dv, XW=XW)
 	a2 = inner_product(u=u_bdry, v=v_bdry, XW=XW_bdry)
-	eps = 1  # TODO
+	eps = 1e-4  # TODO
 	return a1 + a2 / eps
 
 
@@ -164,7 +164,7 @@ def solution_proj(
 
 
 # Galerkin Schemes
-@jax.jit
+# @jax.jit
 def galerkin_solve(
 	bases: Sequence[jax.Array],
 	bases_bdry: Sequence[jax.Array],
@@ -196,7 +196,7 @@ def galerkin_solve(
 	return sol_coeff
 
 
-@jax.jit
+# @jax.jit
 def galerkin_lsq(
 	u: jax.Array,
 	du: jax.Array,
@@ -303,7 +303,7 @@ def train_step(
 	XW_bdry: jax.Array,
 	activation: Callable[[jax.Array], jax.Array],
 ):
-		(loss, coeff), grads = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)(
+	(loss, coeff), grads = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)(
 		params,
 		u,
 		du,
@@ -315,9 +315,9 @@ def train_step(
 		XW_bdry,
 		activation
 	)
-		updates, opt_state = optimizer.update(grads, opt_state, params)
-		params = optax.apply_updates(params, updates)
-		return opt_state, params, -loss, coeff
+	updates, opt_state = optimizer.update(grads, opt_state, params)
+	params = optax.apply_updates(params, updates)
+	return opt_state, params, -loss, coeff
 
 
 def augment_basis(
@@ -358,11 +358,11 @@ def augment_basis(
 			XW_bdry=XW_bdry,
 			activation=activation,
 		)
-		if i % 100 == 0:
+		if i % 10 == 0:
 			print(f'step {i}, loss: {loss}')
 		if jnp.abs(loss) < tol_basis:
 			# TODO: Implement a better stopper.
-			break
+			pass
 
 	# Get the final basis
 	net = single_net(X=X, params=params, activation=activation)
@@ -417,7 +417,6 @@ def adaptive_subspace(
 	tol_basis: float = 1e-6,
 	seed: int = 42
 ):
-
 	# Generate data
 	key = jax.random.key(seed)
 	xa, xb = xbounds
@@ -480,8 +479,6 @@ def adaptive_subspace(
 	bases_train.append(phi_nn)
 	bases_bdry.append(phi_nn_bdry)
 	dbases_train.append(dphi_nn)
-
-	# %%
 	# Basis step loop
 	bstep = 2
 	while (eta_errors[-1] > tol_solution) and (bstep <= max_bases):
@@ -550,11 +547,11 @@ u0 = lambda X: jnp.zeros_like(X)
 du0 = lambda X: jnp.zeros_like(X)
 
 # NN
-n_train = 32
-n_val = 20
+n_train = 128
+n_val = 1000
 N = 5
-r = 1
-A = 0.01
+r = 2
+A = 2 * 1e-2
 rho = 1.1
 
 beta_fn = lambda i: i
@@ -566,12 +563,13 @@ def activations_fn(beta_i):
 network_widths_fn = lambda i: N * r ** (i - 1)
 learning_rates_fn = lambda i: A * rho ** (-(i - 1))
 
-max_bases = 3
-max_epoch_basis = 1_000
-tol_solution = 1e-6
-tol_basis = 1e-6
+max_bases = 8
+max_epoch_basis = 100
+tol_solution = 1e-9
+tol_basis = 1e-4
 seed = 42
 
+# %%
 (
 	eta_errors,
 	solution_coeffs,
@@ -596,3 +594,4 @@ seed = 42
 	tol_basis=tol_basis,
 	seed=seed,
 )
+
