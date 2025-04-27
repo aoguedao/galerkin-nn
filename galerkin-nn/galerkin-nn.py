@@ -43,7 +43,7 @@ def gauss_lengendre_quad(bounds: tuple, n: int) -> Tuple[jax.Array, jax.Array]:
 	x, w = np.polynomial.legendre.leggauss(deg=n)
 	x = 0.5 * (b - a) * x + 0.5 * (b + a)  # From [-1, 1] to [a, b]
 	w = 0.5 * (b - a) * w  # Scale quadrature weights
-	return jnp.array(x).reshape(-1, 1), jnp.array(w).reshape(-1, 1)
+	return jnp.array(x), jnp.array(w)
 
 
 def inner_product(u: jax.Array, v: jax.Array, XW: jax.Array) -> float:
@@ -66,7 +66,7 @@ def bilinear_op(
 ) -> float:
 	a1 = inner_product(u=du, v=dv, XW=XW)
 	a2 = inner_product(u=u_bdry, v=v_bdry, XW=XW_bdry)
-	eps = 1e-4  # TODO
+	eps = 1
 	return a1 + a2 / eps
 
 
@@ -160,8 +160,8 @@ def solution_proj(
 	coeff: jax.Array,
 	bases: Sequence[jax.Array],
 ):
-	bases_matrix = jnp.concat(bases, axis=1)
-	return jnp.dot(bases_matrix, coeff)
+	bases = jnp.stack(bases, axis=1)
+	return jnp.matmul(bases, coeff)
 
 
 # Galerkin Schemes
@@ -174,30 +174,32 @@ def galerkin_solve(
 	XW: jax.Array,
 	XW_bdry: jax.Array,
 ) -> jax.Array:
-	n_bases = len(bases)
-	K = jnp.zeros(shape=(n_bases, n_bases))
-	F = jnp.zeros(shape=(n_bases, 1))
-	for i in range(n_bases):
-		for j in range(i + 1):
-			K_ij = bilinear_op(
-				u=bases[i],
-				v=bases[j],
-				du=dbases[i],
-				dv=dbases[j],
-				u_bdry=bases_bdry[i],
-				v_bdry=bases_bdry[j],
+	bases = jnp.stack(bases, axis=1)
+	dbases = jnp.stack(dbases, axis=1)
+	bases_bdry = jnp.stack(bases_bdry, axis=1)
+
+	F = jax.vmap(lambda v : linear_op(f=f, v=v, XW=XW), in_axes=1)(bases)
+	K = jax.vmap(
+		lambda u, du, u_bdry: jax.vmap(
+			lambda v, dv, v_bdry: bilinear_op(
+				u=u,
+				du=du,
+				u_bdry=u_bdry,
+				v=v,
+				dv=dv,
+				v_bdry=v_bdry,
 				XW=XW,
 				XW_bdry=XW_bdry
-			)
-			K = K.at[i, j].set(K_ij)
-		L_i = linear_op(f=f, v=bases[i], XW=XW)
-		F = F.at[i, 0].set(L_i)
-	K = K + K.T - jnp.diag(jnp.diag(K))
+			),
+			in_axes=1
+		)(bases, dbases, bases_bdry),
+		in_axes=1
+	)(bases, dbases, bases_bdry)
+
 	sol_coeff, _, _, _ = jnp.linalg.lstsq(K, F) # Get solution coefficients
 	return sol_coeff
 
 
-# @jax.jit
 def galerkin_lsq(
 	u: jax.Array,
 	du: jax.Array,
@@ -209,37 +211,31 @@ def galerkin_lsq(
 	XW: jax.Array,
 	XW_bdry: jax.Array
 ) -> jax.Array:
-	# net and dnets shape (xnodes, neurons)
-	n_neurons = net.shape[1]
-	
-	def bilinear_vmap(j, v, dv, vb):
-		# Fix test function (column i), and vectorize over trial functions (j ≤ i)
-		def bilinear_j(u_j, du_j, ub_j):
-			return bilinear_op(u_j, du_j, ub_j, v, dv, vb, XW, XW_bdry)
-		return jax.vmap(bilinear_j, in_axes=1)(net[:, :j+1], dnet[:, :j+1], net_bdry[:, :j+1])
-	
-	def row_fn(i, K):
-		v = net[:, i:i+1]
-		dv = dnet[:, i:i+1]
-		vb = net_bdry[:, i:i+1]
-		K_row_vals = bilinear_vmap(i, v, dv, vb)
-		K = K.at[i, :i+1].set(K_row_vals)
-		return K, None
 
-	K_init = jnp.zeros(shape=(n_neurons, n_neurons))
-	K, _ = lax.scan(row_fn, K_init, jnp.arange(n_neurons))
-	K = jnp.tril(K) + jnp.tril(K, -1).T  # Symmetrize
+	F = jax.vmap(
+		lambda v, dv, v_bdry: residual(
+			u=u, du=du, u_bdry=u_bdry, v=v, dv=dv, v_bdry=v_bdry, f=f, XW=XW, XW_bdry=XW_bdry
+		),
+		in_axes=1
+	)(net, dnet, net_bdry)
 
-  # Vectorized RHS
-	def rhs_i(i):
-		v = net[:, i:i+1]
-		dv = dnet[:, i:i+1]
-		vb = net_bdry[:, i:i+1]
-		L_i = linear_op(f, v, XW)
-		a_i = bilinear_op(u, du, u_bdry, v, dv, vb, XW, XW_bdry)
-		return L_i - a_i
-	
-	F = jax.vmap(rhs_i)(jnp.arange(n_neurons)).reshape(-1, 1)
+	K = jax.vmap(
+		lambda u, du, u_bdry: jax.vmap(
+			lambda v, dv, v_bdry: bilinear_op(
+				u=u,
+				du=du,
+				u_bdry=u_bdry,
+				v=v,
+				dv=dv,
+				v_bdry=v_bdry,
+				XW=XW,
+				XW_bdry=XW_bdry
+			),
+			in_axes=1
+		)(net, dnet, net_bdry),
+		in_axes=1
+	)(net, dnet, net_bdry)
+
 	coeff, _, _, _ = jnp.linalg.lstsq(K, F)
 	return coeff
 
@@ -257,9 +253,9 @@ def loss_fn(
 	activation: Callable[[jax.Array], jax.Array],
 ) -> float:
 	# Net with input layer and hidden layer
-	net = single_net(params=params, X=X, activation=activation)
-	net_bdry = single_net(params=params, X=X_bdry, activation=activation)
-	dnet = dsingle_net(X, params, activation).squeeze(axis=-1)
+	net = single_net(X=X.reshape(-1, X.ndim), params=params, activation=activation)
+	net_bdry = single_net(X=X_bdry.reshape(-1, X.ndim), params=params, activation=activation)
+	dnet = dsingle_net(X.reshape(-1, X.ndim), params, activation).squeeze(axis=-1)
 	# Get output layer coefficients
 	v_nn_coeff = galerkin_lsq(
 		u=u,
@@ -272,9 +268,9 @@ def loss_fn(
 		XW=XW,
 		XW_bdry=XW_bdry,
 	)
-	v_nn = net_proj(X=X, params=params, activation=activation, coeff=v_nn_coeff)
-	v_nn_bdry = net_proj(X=X_bdry, params=params, activation=activation, coeff=v_nn_coeff)
-	dv_nn = dnet_proj(X, params, activation, v_nn_coeff).squeeze(axis=-1)
+	v_nn = net_proj(X=X.reshape(-1, X.ndim), params=params, activation=activation, coeff=v_nn_coeff)
+	v_nn_bdry = net_proj(X=X_bdry.reshape(-1, X.ndim), params=params, activation=activation, coeff=v_nn_coeff)
+	dv_nn = dnet_proj(X.reshape(-1, X.ndim), params, activation, v_nn_coeff).squeeze(axis=-1)
 
 	loss = error_eta(
 		u=u,
@@ -360,16 +356,16 @@ def augment_basis(
 			XW_bdry=XW_bdry,
 			activation=activation,
 		)
-		if i % 10 == 0:
+		if i % (max_epoch // 10) == 0:
 			print(f'step {i}, loss: {loss}')
 		if jnp.abs(loss) < tol_basis:
 			# TODO: Implement a better stopper.
 			pass
 
 	# Get the final basis
-	net = single_net(X=X, params=params, activation=activation)
-	net_bdry = single_net(X=X_bdry, params=params, activation=activation)
-	dnet = dsingle_net(X, params, activation).squeeze(axis=-1)
+	net = single_net(X=X.reshape(-1, X.ndim), params=params, activation=activation)
+	net_bdry = single_net(X=X_bdry.reshape(-1, X.ndim), params=params, activation=activation)
+	dnet = dsingle_net(X.reshape(-1, X.ndim), params, activation).squeeze(axis=-1)
 	v_nn_coeff = galerkin_lsq(
 		u=u,
 		du=du,
@@ -381,9 +377,9 @@ def augment_basis(
 		XW=XW,
 		XW_bdry=XW_bdry,
 	)
-	v_nn = net_proj(X=X, params=params, coeff=v_nn_coeff, activation=activation)
-	v_nn_bdry = net_proj(X=X_bdry, params=params, activation=activation, coeff=v_nn_coeff)
-	dv_nn = dnet_proj(X, params, activation, v_nn_coeff).squeeze(axis=-1)
+	v_nn = net_proj(X=X.reshape(-1, X.ndim), params=params, coeff=v_nn_coeff, activation=activation)
+	v_nn_bdry = net_proj(X=X_bdry.reshape(-1, X.ndim), params=params, activation=activation, coeff=v_nn_coeff)
+	dv_nn = dnet_proj(X.reshape(-1, X.ndim), params, activation, v_nn_coeff).squeeze(axis=-1)
 	v_nn_norm = norm(v=v_nn, dv=dv_nn, v_bdry=v_nn_bdry, XW=XW, XW_bdry=XW_bdry)
 	# Basis $\phi^{NN}$
 	phi_nn = v_nn / v_nn_norm
@@ -424,8 +420,8 @@ def adaptive_subspace(
 	xa, xb = xbounds
 	X_train, XW_train = gauss_lengendre_quad((xa, xb), n_train)
 	X_val, XW_val = gauss_lengendre_quad((xa, xb), n_val)
-	X_bdry = jnp.array([xa, xb], dtype=float).reshape(-1, 1)
-	XW_bdry = jnp.array([2.0, 1.0]).reshape(-1, 1)  # Hardcoded for now
+	X_bdry = jnp.array([xa, xb], dtype=float)
+	XW_bdry = jnp.array([2.0, 1.0])  # Hardcoded for now
 	f_train = source(X_train)
 
 	eta_errors = []  # Remember, for $\eta_i$ we need $\phi_{i+1}^{NN}$
@@ -549,8 +545,8 @@ u0 = lambda X: jnp.zeros_like(X)
 du0 = lambda X: jnp.zeros_like(X)
 
 # NN
-n_train = 128
-n_val = 1000
+n_train = 512
+n_val = 1024
 N = 5
 r = 2
 A = 2 * 1e-2
@@ -565,13 +561,12 @@ def activations_fn(beta_i):
 network_widths_fn = lambda i: N * r ** (i - 1)
 learning_rates_fn = lambda i: A * rho ** (-(i - 1))
 
-max_bases = 8
-max_epoch_basis = 100
+max_bases = 6
+max_epoch_basis = 10_000
 tol_solution = 1e-9
 tol_basis = 1e-4
 seed = 42
 
-# %%
 (
 	eta_errors,
 	solution_coeffs,
@@ -596,4 +591,4 @@ seed = 42
 	tol_basis=tol_basis,
 	seed=seed,
 )
-
+print(eta_errors)
