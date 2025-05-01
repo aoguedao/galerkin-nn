@@ -162,24 +162,23 @@ def error_eta(
 def solution_proj(
 	coeff: jax.Array,
 	bases: Sequence[jax.Array],
-):
+) -> jax.Array:
 	bases = jnp.stack(bases, axis=1)
-	return jnp.matmul(bases, coeff)
+	return jnp.dot(bases, coeff)
 
 
 def solution_pred(
 	X: jax.Array,
 	coeff: Sequence[jax.Array],
 	basis_fns: Sequence[Callable],
-):
+) -> jax.Array:
 	assert len(basis_fns) == len(coeff)
-	bases = [basis_fn(X=X) for basis_fn in basis_fns]
+	bases = [basis_fn(X) for basis_fn in basis_fns]
 	u = solution_proj(coeff=coeff, bases=bases)
 	return u
 
 
 # Galerkin Schemes
-# @jax.jit
 def galerkin_solve(
 	bases: Sequence[jax.Array],
 	bases_bdry: Sequence[jax.Array],
@@ -234,14 +233,14 @@ def galerkin_lsq(
 	)(net, dnet, net_bdry)
 
 	K = jax.vmap(
-		lambda u, du, u_bdry: jax.vmap(
-			lambda v, dv, v_bdry: bilinear_op(
-				u=u,
-				du=du,
-				u_bdry=u_bdry,
-				v=v,
-				dv=dv,
-				v_bdry=v_bdry,
+		lambda v_i, dv_i, v_bdry_i: jax.vmap(
+			lambda v_j, dv_j, v_bdry_j: bilinear_op(
+				u=v_i,
+				du=dv_i,
+				u_bdry=v_bdry_i,
+				v=v_j,
+				dv=dv_j,
+				v_bdry=v_bdry_j,
 				XW=XW,
 				XW_bdry=XW_bdry
 			),
@@ -269,7 +268,7 @@ def loss_fn(
 	# Net with input layer and hidden layer
 	net = single_net(X=X.reshape(-1, X.ndim), params=params, activation=activation)
 	net_bdry = single_net(X=X_bdry.reshape(-1, X.ndim), params=params, activation=activation)
-	dnet = dsingle_net(X.reshape(-1, X.ndim), params, activation).squeeze(axis=-1)
+	dnet = dsingle_net(X.reshape(-1, X.ndim), params, activation).squeeze()
 	# Get output layer coefficients
 	v_nn_coeff = galerkin_lsq(
 		u=u,
@@ -284,7 +283,11 @@ def loss_fn(
 	)
 	v_nn = net_proj(X=X.reshape(-1, X.ndim), params=params, activation=activation, coeff=v_nn_coeff)
 	v_nn_bdry = net_proj(X=X_bdry.reshape(-1, X.ndim), params=params, activation=activation, coeff=v_nn_coeff)
-	dv_nn = dnet_proj(X.reshape(-1, X.ndim), params, activation, v_nn_coeff).squeeze(axis=-1)
+	dv_nn = dnet_proj(X.reshape(-1, X.ndim), params, activation, v_nn_coeff).squeeze()
+
+	# v_nn_2 = jnp.dot(net, v_nn_coeff)
+	# v_nn_bdry_2 = jnp.dot(net, v_nn_coeff)
+	# dv_nn_2 = jnp.dot(net, v_nn_coeff)
 
 	loss = error_eta(
 		u=u,
@@ -297,7 +300,7 @@ def loss_fn(
 		XW=XW,
 		XW_bdry=XW_bdry
 	)
-	return -loss, v_nn_coeff
+	return -jnp.abs(loss), v_nn_coeff
 
 
 @partial(jax.jit, static_argnums=(0, 11))
@@ -329,7 +332,7 @@ def train_step(
 	)
 	updates, opt_state = optimizer.update(grads, opt_state, params)
 	params = optax.apply_updates(params, updates)
-	return opt_state, params, -loss, coeff
+	return opt_state, params, loss, coeff
 
 
 def augment_basis(
@@ -349,10 +352,11 @@ def augment_basis(
 	key: PRNGKeyArray,
 ):
 	optimizer = optax.adam(learning_rate=learning_rate)
-	# key_W, key_b = jax.random.split(key, num=2)
+	key_W, key_b = jax.random.split(key, num=2)
 	params = {
-		'W': jnp.ones(shape=(1, neurons)),
-		'b': - jnp.linspace(1 / neurons, 1, neurons),
+		# 'W': jnp.ones(shape=(1, neurons)),
+		"W": jax.random.normal(shape=(1, neurons), key=key_W),
+		"b": - jnp.linspace(1 / neurons, 1, neurons),
 	}
 	opt_state = optimizer.init(params)
 	loss_prev = 1e10
@@ -372,7 +376,7 @@ def augment_basis(
 			activation=activation,
 		)
 		if i % (max_epoch // 10) == 0:
-			print(f'step {i}, loss: {loss}')
+			print(f'step {i}, loss: {loss.item()}')
 		if jnp.abs((loss - loss_prev) / loss_prev) < tol_basis:
 			break
 		else:
@@ -381,7 +385,7 @@ def augment_basis(
 	# Get the final basis
 	net = single_net(X=X.reshape(-1, X.ndim), params=params, activation=activation)
 	net_bdry = single_net(X=X_bdry.reshape(-1, X.ndim), params=params, activation=activation)
-	dnet = dsingle_net(X.reshape(-1, X.ndim), params, activation).squeeze(axis=-1)
+	dnet = dsingle_net(X.reshape(-1, X.ndim), params, activation).squeeze()
 	v_nn_coeff = galerkin_lsq(
 		u=u,
 		du=du,
@@ -394,11 +398,9 @@ def augment_basis(
 		XW_bdry=XW_bdry,
 	)
 	# Basis $\phi^{NN}$
-	X_int = X
-	@partial(jax.jit, static_argnames="activation")
+	# X_int = X
 	def basis_fn(
-		X: jax.Array,
-		X_int: jax.Array = X_int,
+		X: jax.Array = X,
 		X_bdry: jax.Array = X_bdry,
 		XW: jax.Array = XW,
 		XW_bdry: jax.Array = XW_bdry,
@@ -406,22 +408,25 @@ def augment_basis(
 		activation: Callable[[jax.Array], jax.Array] = activation,
 		coeff: jax.Array = v_nn_coeff,
 	):
-		v_nn = net_proj(X=X_int.reshape(-1, X_int.ndim), params=params, coeff=coeff, activation=activation)
-		v_nn_bdry = net_proj(X=X_bdry.reshape(-1, X_int.ndim), params=params, activation=activation, coeff=v_nn_coeff)
-		dv_nn = dnet_proj(X_int.reshape(-1, X_int.ndim), params, activation, v_nn_coeff).squeeze(axis=-1)
+		v_nn = net_proj(X=X.reshape(-1, X.ndim), params=params, coeff=coeff, activation=activation)
+		v_nn_bdry = net_proj(X=X_bdry.reshape(-1, X.ndim), params=params, activation=activation, coeff=coeff)
+		dv_nn = dnet_proj(X.reshape(-1, X.ndim), params, activation, coeff).squeeze()
 		v_nn_norm = norm(v=v_nn, dv=dv_nn, v_bdry=v_nn_bdry, XW=XW, XW_bdry=XW_bdry)
-		return net_proj(X=X.reshape(-1, X.ndim), params=params, coeff=coeff, activation=activation) / v_nn_norm
 
-	# v_nn = net_proj(X=X.reshape(-1, X.ndim), params=params, coeff=v_nn_coeff, activation=activation)
-	# v_nn_bdry = net_proj(X=X_bdry.reshape(-1, X.ndim), params=params, activation=activation, coeff=v_nn_coeff)
-	# dv_nn = dnet_proj(X.reshape(-1, X.ndim), params, activation, v_nn_coeff).squeeze(axis=-1)
-	# v_nn_norm = norm(v=v_nn, dv=dv_nn, v_bdry=v_nn_bdry, XW=XW, XW_bdry=XW_bdry)
-	# phi_nn = v_nn / v_nn_norm
-	# phi_nn_bdry = v_nn_bdry / v_nn_norm
-	# dphi_nn = dv_nn / v_nn_norm
-	phi_nn = basis_fn(X)
-	phi_nn_bdry = basis_fn(X_bdry)
-	dphi_nn = basis_fn(X)
+		@jax.jit
+		def phi(x):
+			return net_proj(X=x.reshape(-1, x.ndim), params=params, coeff=coeff, activation=activation) / v_nn_norm
+
+		@jax.jit
+		def dphi(x):
+			return dnet_proj(x.reshape(-1, x.ndim), params, activation, coeff).squeeze() / v_nn_norm
+
+		return phi, dphi
+
+	phi_fn, dphi_fn = basis_fn()
+	phi_nn = phi_fn(X)
+	phi_nn_bdry = dphi_fn(X_bdry)
+	dphi_nn = dphi_fn(X)
 	eta = error_eta(
 		u=u,
 		du=du,
@@ -434,7 +439,7 @@ def augment_basis(
 		XW_bdry=XW_bdry
 	)
 
-	return phi_nn, phi_nn_bdry, dphi_nn, eta, params, coeff, basis_fn
+	return phi_nn, phi_nn_bdry, dphi_nn, eta, params, coeff, phi_fn, dphi_fn
 
 
 def adaptive_subspace(
@@ -459,7 +464,7 @@ def adaptive_subspace(
 	X_train, XW_train = gauss_lengendre_quad((xa, xb), n_train)
 	X_val, XW_val = gauss_lengendre_quad((xa, xb), n_val)
 	X_bdry = jnp.array([xa, xb], dtype=float)
-	XW_bdry = jnp.array([2.0, 1.0])  # Hardcoded for now
+	XW_bdry = jnp.array([1.0, 1.0])  # Hardcoded for now
 	f_train = source(X_train)
 
 	eta_errors = []  # Remember, for $\eta_i$ we need $\phi_{i+1}^{NN}$
@@ -469,6 +474,7 @@ def adaptive_subspace(
 	bases_bdry = []
 	dbases_train = []
 	basis_fns = []
+	dbasis_fns = []
 	solution_coeffs = []
 
 	# Zero basis
@@ -478,6 +484,7 @@ def adaptive_subspace(
 	u_bdry = u0(X_bdry)
 	u_norm = norm(v=u_train, dv=du_train, v_bdry=u_bdry, XW=XW_train, XW_bdry=XW_bdry)
 
+	@partial(jax.jit, static_argnames=["u0"])
 	def phi_nn_0_fn(
 		X: jax.Array,
 		u0: Callable[[jax.Array], jax.Array] = u0,
@@ -498,6 +505,7 @@ def adaptive_subspace(
 	bases_params.append(None)  # There are no NN Weights and Biases for $\phi_0^{NN}$
 	bases_coeffs.append(None)  # There are no NN Coefficients for $\phi_0^{NN}$
 	basis_fns.append(phi_nn_0_fn)
+	dbasis_fns.append(dphi_nn_0_fn)
 	solution_coeffs.append(jnp.array([1.0]))
 
 	# First basis step
@@ -505,7 +513,7 @@ def adaptive_subspace(
 	activation = activations_fn(1)
 	neurons = network_widths_fn(1)
 	learning_rate = learning_rates_fn(1)
-	phi_nn, phi_nn_bdry, dphi_nn, eta, params, coeff, phi_nn_fn = augment_basis(
+	phi_nn, phi_nn_bdry, dphi_nn, eta, params, coeff, phi_nn_fn, dphi_nn_fn = augment_basis(
 		u=u_train,
 		du=du_train,
 		u_bdry=u_bdry,
@@ -527,7 +535,9 @@ def adaptive_subspace(
 	bases_train.append(phi_nn)
 	bases_bdry.append(phi_nn_bdry)
 	dbases_train.append(dphi_nn)
-	basis_fns.append(phi_nn_fn)
+	basis_fns.append(phi_nn_fn)  # First item Phi(X)
+	dbasis_fns.append(dphi_nn_fn)	# Second item dPhi(X)/dX
+
 	# Basis step loop
 	bstep = 2
 	while (np.abs(eta_errors[-1]) > tol_solution) and (bstep <= max_bases):
@@ -550,7 +560,7 @@ def adaptive_subspace(
 		learning_rate = learning_rates_fn(bstep)
 		key, _ = jax.random.split(key, num=2)
 
-		phi_nn, phi_nn_bdry, dphi_nn, eta, params, coeff, phi_nn_fn = augment_basis(
+		phi_nn, phi_nn_bdry, dphi_nn, eta, params, coeff, phi_nn_fn, dphi_nn_fn = augment_basis(
 			u=u_train,
 			du=du_train,
 			u_bdry=u_bdry,
@@ -574,6 +584,7 @@ def adaptive_subspace(
 		bases_bdry.append(phi_nn_bdry)
 		dbases_train.append(dphi_nn)
 		basis_fns.append(phi_nn_fn)
+		dbasis_fns.append(dphi_nn_fn)
 		bstep += 1
 
 	# Last coefficients
@@ -595,82 +606,90 @@ def adaptive_subspace(
 		bases_train,
 		bases_bdry,
 		dbases_train,
-		basis_fns
+		basis_fns,
+		dbasis_fns
+	)
+# %%
+if __name__ == "__main__":
+	# PDE
+	xbounds = 0.0, 1.0
+	def source(X: jax.Array) -> jax.Array:
+		f1 = (2 * jnp.pi) ** 2 * jnp.sin(2 * jnp.pi * X)
+		f2 = (4 * jnp.pi) ** 2 * jnp.sin(4 * jnp.pi * X)
+		f3 = (6 * jnp.pi) ** 2 * jnp.sin(6 * jnp.pi * X)
+		return f1 + f2 + f3
+	u0 = lambda X: jnp.zeros_like(X)
+	du0 = lambda X: jnp.zeros_like(X)
+
+	# NN
+	n_train = 512
+	n_val = 1024
+	N = 5
+	r = 2
+	A = 2 * 1e-2
+	rho = 1.1
+
+
+	def activations_fn(i):
+		scale_fn = lambda i: i
+		scale_i = scale_fn(i)
+		def activation(x):
+			return jnp.tanh(scale_i * x)
+		return activation
+
+	network_widths_fn = lambda i: N * r ** (i - 1)
+	learning_rates_fn = lambda i: A * rho ** (-(i - 1))
+
+	max_bases = 6
+	max_epoch_basis = 1_000
+	tol_solution = 1e-12
+	tol_basis = 1e-9
+	seed = 1
+
+	(
+		eta_errors,
+		solution_coeffs,
+		bases_params,
+		bases_coeffs,
+		bases_train,
+		bases_bdry,
+		dbases_train,
+		basis_fns,
+		dbasis_fns
+	) = adaptive_subspace(
+		xbounds=xbounds,
+		source=source,
+		u0=u0,
+		du0=du0,
+		n_train=n_train,
+		n_val=n_val,
+		activations_fn=activations_fn,
+		network_widths_fn=network_widths_fn,
+		learning_rates_fn=learning_rates_fn,
+		max_bases=max_bases,
+		max_epoch_basis=max_epoch_basis,
+		tol_solution=tol_solution,
+		tol_basis=tol_basis,
+		seed=seed,
 	)
 
-# %%
-# PDE
-xbounds = 0.0, 1.0
-def source(X: jax.Array) -> jax.Array:
-	f1 = (2 * jnp.pi) ** 2 * jnp.sin(2 * jnp.pi * X)
-	f2 = (4 * jnp.pi) ** 2 * jnp.sin(4 * jnp.pi * X)
-	f3 = (6 * jnp.pi) ** 2 * jnp.sin(6 * jnp.pi * X)
-	return f1 + f2 + f3
-u0 = lambda X: jnp.zeros_like(X)
-du0 = lambda X: jnp.zeros_like(X)
 
-# NN
-n_train = 512
-n_val = 1024
-N = 5
-r = 2
-A = 2 * 1e-2
-rho = 1.1
+	def solution(X: jax.Array):
+		eps = 1e-3
+		u1 = jnp.sin(2 * jnp.pi * X)
+		u2 = jnp.sin(4 * jnp.pi * X)
+		u3 = jnp.sin(6 * jnp.pi * X)
+		u4 = (-24 * jnp.pi * eps * X + 12 * jnp.pi * eps) / (1 + 2 * eps)
+		return u1 + u2 + u3 + u4
 
-beta_fn = lambda i: i
-def activations_fn(beta_i):
-	def activation(x):
-		return jnp.tanh(beta_i * x)
-	return activation
+	num_test = 512
+	X_test = jnp.linspace(xbounds[0], xbounds[1], num=num_test)
 
-network_widths_fn = lambda i: N * r ** (i - 1)
-learning_rates_fn = lambda i: A * rho ** (-(i - 1))
-
-max_bases = 4
-max_epoch_basis = 1_000
-tol_solution = 1e-9
-tol_basis = 1e-16
-seed = 23
-
-(
-	eta_errors,
-	solution_coeffs,
-	bases_params,
-	bases_coeffs,
-	bases_train,
-	bases_bdry,
-	dbases_train,
-	basis_fns
-) = adaptive_subspace(
-	xbounds=xbounds,
-	source=source,
-	u0=u0,
-	du0=du0,
-	n_train=n_train,
-	n_val=n_val,
-	activations_fn=activations_fn,
-	network_widths_fn=network_widths_fn,
-	learning_rates_fn=learning_rates_fn,
-	max_bases=max_bases,
-	max_epoch_basis=max_epoch_basis,
-	tol_solution=tol_solution,
-	tol_basis=tol_basis,
-	seed=seed,
-)
-
-
-def solution(X: jax.Array):
-	eps = 1
-	u1 = jnp.sin(2 * jnp.pi * X)
-	u2 = jnp.sin(4 * jnp.pi * X)
-	u3 = jnp.sin(6 * jnp.pi * X)
-	u4 = (-24 * jnp.pi * eps * X + 12 * jnp.pi * eps) / (1 + 2 * eps)
-	return u1 + u2 + u3 + u4
-
-num_test = 512
-X_test = jnp.linspace(xbounds[0], xbounds[1], num=num_test)
-
-u_actual = solution(X_test)
-u_pred = solution_pred(X=X_test, coeff=solution_coeffs[-1], basis_fns=basis_fns)
-print(jnp.linalg.norm(u_actual - u_pred))
-# %%
+	u_actual = solution(X_test)
+	u_pred = solution_pred(X=X_test, coeff=solution_coeffs[-1], basis_fns=basis_fns)
+	print(jnp.linalg.norm(u_actual - u_pred))
+	# %%
+	import matplotlib.pyplot as plt
+	fig, ax = plt.subplots()
+	ax.plot(X_test, u_actual, c="blue")
+	ax.plot(X_test, u_pred / 20, c="red")
