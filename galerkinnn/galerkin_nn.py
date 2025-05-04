@@ -11,6 +11,7 @@ from typing import Callable, Sequence, Tuple
 
 jax.config.update("jax_enable_x64", True)
 
+eps = 1e-3
 
 # Neural Network
 def single_net(
@@ -69,7 +70,7 @@ def bilinear_op(
 ) -> float:
 	a1 = inner_product(u=du, v=dv, XW=XW)
 	a2 = inner_product(u=u_bdry, v=v_bdry, XW=XW_bdry)
-	eps = 1e-3
+	# eps = 1e-3
 	return a1 + a2 / eps
 
 
@@ -209,7 +210,8 @@ def galerkin_solve(
 		in_axes=1
 	)(bases, dbases, bases_bdry)
 
-	sol_coeff, _, _, _ = jnp.linalg.lstsq(K, F) # Get solution coefficients
+	# sol_coeff, _, _, _ = jnp.linalg.lstsq(K, F) # Get solution coefficients
+	sol_coeff = jnp.linalg.solve(K ,F)
 	return sol_coeff
 
 
@@ -252,7 +254,7 @@ def galerkin_lsq(
 	coeff, _, _, _ = jnp.linalg.lstsq(K, F)
 	return coeff
 
-
+@partial(jax.jit, static_argnames=["activation"])
 def loss_fn(
 	params: optax.Params,
 	u: jax.Array,
@@ -264,7 +266,7 @@ def loss_fn(
 	XW: jax.Array,
 	XW_bdry: jax.Array,
 	activation: Callable[[jax.Array], jax.Array],
-) -> float:
+) -> tuple[float, jax.Array]:
 	# Net with input layer and hidden layer
 	net = single_net(X=X.reshape(-1, X.ndim), params=params, activation=activation)
 	net_bdry = single_net(X=X_bdry.reshape(-1, X.ndim), params=params, activation=activation)
@@ -285,10 +287,6 @@ def loss_fn(
 	v_nn_bdry = net_proj(X=X_bdry.reshape(-1, X.ndim), params=params, activation=activation, coeff=v_nn_coeff)
 	dv_nn = dnet_proj(X.reshape(-1, X.ndim), params, activation, v_nn_coeff).squeeze()
 
-	# v_nn_2 = jnp.dot(net, v_nn_coeff)
-	# v_nn_bdry_2 = jnp.dot(net, v_nn_coeff)
-	# dv_nn_2 = jnp.dot(net, v_nn_coeff)
-
 	loss = error_eta(
 		u=u,
 		du=du,
@@ -300,10 +298,10 @@ def loss_fn(
 		XW=XW,
 		XW_bdry=XW_bdry
 	)
-	return -jnp.abs(loss), v_nn_coeff
+	return -jnp.abs(loss), v_nn_coeff  # It is maximizing!
 
 
-@partial(jax.jit, static_argnums=(0, 11))
+# @partial(jax.jit, static_argnums=(0, 11))
 def train_step(
 	optimizer: optax.GradientTransformation,
 	opt_state: optax.OptState,
@@ -317,7 +315,7 @@ def train_step(
 	XW: jax.Array,
 	XW_bdry: jax.Array,
 	activation: Callable[[jax.Array], jax.Array],
-):
+) -> tuple[optax.OptState, optax.Params, float, jax.Array]:
 	(loss, coeff), grads = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)(
 		params,
 		u,
@@ -351,16 +349,19 @@ def augment_basis(
 	tol_basis: float,
 	key: PRNGKeyArray,
 ):
+	print(f"Activation(inf): {jax.grad(activation)(0.0)}")
+	print(f"Neurons: {neurons}")
+	print(f"Learning Rate: {learning_rate}")
 	optimizer = optax.adam(learning_rate=learning_rate)
 	key_W, key_b = jax.random.split(key, num=2)
 	params = {
-		# 'W': jnp.ones(shape=(1, neurons)),
-		"W": jax.random.normal(shape=(1, neurons), key=key_W),
-		"b": - jnp.linspace(1 / neurons, 1, neurons),
+		'W': jnp.ones(shape=(1, neurons)),
+		# "W": jax.random.normal(shape=(1, neurons), key=key_W),
+		"b": - jnp.linspace(0, 1, neurons),
 	}
 	opt_state = optimizer.init(params)
 	loss_prev = 1e10
-	for i in range(1, max_epoch + 1):
+	for i in range(max_epoch):
 		opt_state, params, loss, coeff = train_step(
 			optimizer=optimizer,
 			opt_state=opt_state,
@@ -376,7 +377,7 @@ def augment_basis(
 			activation=activation,
 		)
 		if i % (max_epoch // 10) == 0:
-			print(f'step {i}, loss: {loss.item()}')
+			print(f'step {i}, loss: {- loss.item()}')
 		if jnp.abs((loss - loss_prev) / loss_prev) < tol_basis:
 			break
 		else:
@@ -399,33 +400,42 @@ def augment_basis(
 	)
 	# Basis $\phi^{NN}$
 	# X_int = X
-	def basis_fn(
-		X: jax.Array = X,
-		X_bdry: jax.Array = X_bdry,
-		XW: jax.Array = XW,
-		XW_bdry: jax.Array = XW_bdry,
-		params: optax.Params = params,
-		activation: Callable[[jax.Array], jax.Array] = activation,
-		coeff: jax.Array = v_nn_coeff,
-	):
-		v_nn = net_proj(X=X.reshape(-1, X.ndim), params=params, coeff=coeff, activation=activation)
-		v_nn_bdry = net_proj(X=X_bdry.reshape(-1, X.ndim), params=params, activation=activation, coeff=coeff)
-		dv_nn = dnet_proj(X.reshape(-1, X.ndim), params, activation, coeff).squeeze()
-		v_nn_norm = norm(v=v_nn, dv=dv_nn, v_bdry=v_nn_bdry, XW=XW, XW_bdry=XW_bdry)
+	# def basis_fn(
+	# 	X: jax.Array = X,
+	# 	X_bdry: jax.Array = X_bdry,
+	# 	XW: jax.Array = XW,
+	# 	XW_bdry: jax.Array = XW_bdry,
+	# 	params: optax.Params = params,
+	# 	activation: Callable[[jax.Array], jax.Array] = activation,
+	# 	coeff: jax.Array = v_nn_coeff,
+	# ):
+	# 	# v_nn = net_proj(X=X.reshape(-1, X.ndim), params=params, coeff=coeff, activation=activation)
+	# 	# v_nn_bdry = net_proj(X=X_bdry.reshape(-1, X.ndim), params=params, activation=activation, coeff=coeff)
+	# 	# dv_nn = dnet_proj(X.reshape(-1, X.ndim), params, activation, coeff).squeeze()
+	# 	# v_nn_norm = norm(v=v_nn, dv=dv_nn, v_bdry=v_nn_bdry, XW=XW, XW_bdry=XW_bdry)
+	# 	v_nn_norm = 1
 
-		@jax.jit
-		def phi(x):
-			return net_proj(X=x.reshape(-1, x.ndim), params=params, coeff=coeff, activation=activation) / v_nn_norm
+	# 	@jax.jit
+	# 	def phi(x):
+	# 		return net_proj(X=x.reshape(-1, x.ndim), params=params, coeff=coeff, activation=activation) / v_nn_norm
 
-		@jax.jit
-		def dphi(x):
-			return dnet_proj(x.reshape(-1, x.ndim), params, activation, coeff).squeeze() / v_nn_norm
+	# 	@jax.jit
+	# 	def dphi(x):
+	# 		return dnet_proj(x.reshape(-1, x.ndim), params, activation, coeff).squeeze() / v_nn_norm
 
-		return phi, dphi
+	# 	return phi, dphi
 
-	phi_fn, dphi_fn = basis_fn()
+	@jax.jit
+	def phi_fn(x):
+		return net_proj(X=x.reshape(-1, x.ndim), params=params, activation=activation, coeff=v_nn_coeff)
+
+	@jax.jit
+	def dphi_fn(x):
+		return dnet_proj(x.reshape(-1, x.ndim), params, activation, v_nn_coeff).squeeze()
+
+	# phi_fn, dphi_fn = basis_fn()
 	phi_nn = phi_fn(X)
-	phi_nn_bdry = dphi_fn(X_bdry)
+	phi_nn_bdry = phi_fn(X_bdry)
 	dphi_nn = dphi_fn(X)
 	eta = error_eta(
 		u=u,
@@ -477,83 +487,16 @@ def adaptive_subspace(
 	dbasis_fns = []
 	solution_coeffs = []
 
-	# Zero basis
-	print(f"Basis: 0")
 	u_train = u0(X_train)
 	du_train = du0(X_train)
 	u_bdry = u0(X_bdry)
-	u_norm = norm(v=u_train, dv=du_train, v_bdry=u_bdry, XW=XW_train, XW_bdry=XW_bdry)
 
-	@partial(jax.jit, static_argnames=["u0"])
-	def phi_nn_0_fn(
-		X: jax.Array,
-		u0: Callable[[jax.Array], jax.Array] = u0,
-		u0_norm: float = u_norm
-	):
-		return lax.cond(
-			u0_norm != 0.0,
-			lambda x: u0(x) / u0_norm,
-			lambda x: u0(x),
-			operand=X
-		)
-
-	dphi_nn_0_fn = jax.vmap(jax.jacobian(phi_nn_0_fn, argnums=0))
-	bases_train.append(phi_nn_0_fn(X=X_train))
-	bases_bdry.append(phi_nn_0_fn(X=X_bdry))
-	dbases_train.append(dphi_nn_0_fn(X_train).squeeze())
-
-	bases_params.append(None)  # There are no NN Weights and Biases for $\phi_0^{NN}$
-	bases_coeffs.append(None)  # There are no NN Coefficients for $\phi_0^{NN}$
-	basis_fns.append(phi_nn_0_fn)
-	dbasis_fns.append(dphi_nn_0_fn)
-	solution_coeffs.append(jnp.array([1.0]))
-
-	# First basis step
-	print(f"Basis: 1")
-	activation = activations_fn(1)
-	neurons = network_widths_fn(1)
-	learning_rate = learning_rates_fn(1)
-	phi_nn, phi_nn_bdry, dphi_nn, eta, params, coeff, phi_nn_fn, dphi_nn_fn = augment_basis(
-		u=u_train,
-		du=du_train,
-		u_bdry=u_bdry,
-		f=f_train,
-		X=X_train,
-		X_bdry=X_bdry,
-		XW=XW_train,
-		XW_bdry=XW_bdry,
-		activation=activation,
-		neurons=neurons,
-		learning_rate=learning_rate,
-		max_epoch=max_epoch_basis,
-		tol_basis=tol_basis,
-		key=key
-	)
-	eta_errors.append(eta)
-	bases_params.append(params)
-	bases_coeffs.append(coeff)
-	bases_train.append(phi_nn)
-	bases_bdry.append(phi_nn_bdry)
-	dbases_train.append(dphi_nn)
-	basis_fns.append(phi_nn_fn)  # First item Phi(X)
-	dbasis_fns.append(dphi_nn_fn)	# Second item dPhi(X)/dX
 
 	# Basis step loop
-	bstep = 2
-	while (np.abs(eta_errors[-1]) > tol_solution) and (bstep <= max_bases):
-		print(f"Basis: {bstep}")
-		u_coeff = galerkin_solve(
-			bases_train,
-			bases_bdry,
-			dbases_train,
-			f_train,
-			XW_train,
-			XW_bdry,
-		)
-		solution_coeffs.append(u_coeff)
-		u_train = solution_proj(u_coeff, bases=bases_train)
-		u_bdry = solution_proj(u_coeff, bases=bases_bdry)
-		du_train = solution_proj(u_coeff, bases=dbases_train)
+	bstep = 1
+	error = 1e10
+	while (error > tol_solution) and (bstep <= max_bases):
+		print(f"Basis Step: {bstep}")
 
 		activation = activations_fn(bstep)
 		neurons = network_widths_fn(bstep)
@@ -585,18 +528,24 @@ def adaptive_subspace(
 		dbases_train.append(dphi_nn)
 		basis_fns.append(phi_nn_fn)
 		dbasis_fns.append(dphi_nn_fn)
-		bstep += 1
 
-	# Last coefficients
-	u_coeff = galerkin_solve(
-		bases_train,
-		bases_bdry,
-		dbases_train,
-		f_train,
-		XW_train,
-		XW_bdry,
-	)
-	solution_coeffs.append(u_coeff)
+		# Solution coefficients
+		u_coeff = galerkin_solve(
+			bases_train,
+			bases_bdry,
+			dbases_train,
+			f_train,
+			XW_train,
+			XW_bdry,
+		)
+		print(f"Solution coeffs: {u_coeff}")
+		solution_coeffs.append(u_coeff)
+		u_train = solution_proj(u_coeff, bases=bases_train)
+		u_bdry = solution_proj(u_coeff, bases=bases_bdry)
+		du_train = solution_proj(u_coeff, bases=dbases_train)
+
+		bstep += 1
+		error = jnp.abs(eta)
 
 	return (
 		eta_errors,
@@ -615,19 +564,19 @@ if __name__ == "__main__":
 	xbounds = 0.0, 1.0
 	def source(X: jax.Array) -> jax.Array:
 		f1 = (2 * jnp.pi) ** 2 * jnp.sin(2 * jnp.pi * X)
-		f2 = (4 * jnp.pi) ** 2 * jnp.sin(4 * jnp.pi * X)
-		f3 = (6 * jnp.pi) ** 2 * jnp.sin(6 * jnp.pi * X)
-		return f1 + f2 + f3
+		f2 = 0.1 * (25 * jnp.pi) ** 2 * jnp.sin(25 * jnp.pi * X)
+		return f1 + f2
+
 	u0 = lambda X: jnp.zeros_like(X)
 	du0 = lambda X: jnp.zeros_like(X)
 
 	# NN
-	n_train = 512
+	n_train = 1024
 	n_val = 1024
-	N = 5
-	r = 2
-	A = 2 * 1e-2
-	rho = 1.1
+	N = 5  # Init Neurons
+	r = 2  # Neurons Growth
+	A = 5 * 1e-3  # Init Learning Rate
+	rho = 1.1  # Learning Rate Growth
 
 
 	def activations_fn(i):
@@ -640,9 +589,9 @@ if __name__ == "__main__":
 	network_widths_fn = lambda i: N * r ** (i - 1)
 	learning_rates_fn = lambda i: A * rho ** (-(i - 1))
 
-	max_bases = 6
-	max_epoch_basis = 1_000
-	tol_solution = 1e-12
+	max_bases = 5
+	max_epoch_basis = 100
+	tol_solution = 1e-9
 	tol_basis = 1e-9
 	seed = 1
 
@@ -675,21 +624,50 @@ if __name__ == "__main__":
 
 
 	def solution(X: jax.Array):
-		eps = 1e-3
 		u1 = jnp.sin(2 * jnp.pi * X)
-		u2 = jnp.sin(4 * jnp.pi * X)
-		u3 = jnp.sin(6 * jnp.pi * X)
-		u4 = (-24 * jnp.pi * eps * X + 12 * jnp.pi * eps) / (1 + 2 * eps)
-		return u1 + u2 + u3 + u4
+		u2 = 0.1 * jnp.sin(25 * jnp.pi * X)
+		u3 = 5.0 * jnp.pi * eps * (10 * eps - 8 * X + 9) / (20 * eps + 10)
+		return u1 + u2 + u3
 
-	num_test = 512
-	X_test = jnp.linspace(xbounds[0], xbounds[1], num=num_test)
+	n_test = 512
+	X_test, XW_test = gauss_lengendre_quad(xbounds, n_test)
+	X_bdry = jnp.array(xbounds, dtype=float)
+	XW_bdry = jnp.array([1.0, 1.0])
 
 	u_actual = solution(X_test)
 	u_pred = solution_pred(X=X_test, coeff=solution_coeffs[-1], basis_fns=basis_fns)
 	print(jnp.linalg.norm(u_actual - u_pred))
-	# %%
+
+
 	import matplotlib.pyplot as plt
 	fig, ax = plt.subplots()
-	ax.plot(X_test, u_actual, c="blue")
-	ax.plot(X_test, u_pred / 20, c="red")
+	ax.plot(X_test, u_actual, label="actual")
+	ax.plot(X_test, u_pred, label="estimated")
+	ax.legend()
+	fig.savefig("solution.png")
+	fig.show()
+
+
+
+	# %%
+	# Check inner products
+	u = solution(X_test)
+	du = jax.vmap(jax.grad(solution))(X_test)
+	u_bdry = solution(X_bdry)
+	f = source(X_test)
+	df = jax.vmap(jax.grad(source))(X_test)
+	f_bdry = source(X_bdry)
+	inner = inner_product(u, f, XW_test)
+	bilinear = bilinear_op(u=u, du=du, u_bdry=u_bdry, v=f, dv=df, v_bdry=f_bdry, XW=XW_test, XW_bdry=XW_bdry)
+	print(inner)
+	print(bilinear)
+
+
+	# %%
+	# Check norms
+	for i in range(len(dbasis_fns)):
+		phi = basis_fns[i](X_test)
+		dphi = dbasis_fns[i](X_test)
+		phi_bdry = basis_fns[i](X_bdry)
+		phi_norm = norm(v=phi, dv=dphi, v_bdry=phi_bdry, XW=XW_test, XW_bdry=XW_bdry)
+		print(phi_norm)
