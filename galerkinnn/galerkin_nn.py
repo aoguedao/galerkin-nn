@@ -194,14 +194,14 @@ def galerkin_solve(
 
 	F = jax.vmap(lambda v : linear_op(f=f, v=v, XW=XW), in_axes=1)(bases)
 	K = jax.vmap(
-		lambda u, du, u_bdry: jax.vmap(
-			lambda v, dv, v_bdry: bilinear_op(
-				u=u,
-				du=du,
-				u_bdry=u_bdry,
-				v=v,
-				dv=dv,
-				v_bdry=v_bdry,
+		lambda phi_i, dphi_i, phi_bdry_i: jax.vmap(
+			lambda phi_j, dphi_j, phi_bdry_j: bilinear_op(
+				u=phi_i,
+				du=dphi_i,
+				u_bdry=phi_bdry_i,
+				v=phi_j,
+				dv=dphi_j,
+				v_bdry=phi_bdry_j,
 				XW=XW,
 				XW_bdry=XW_bdry
 			),
@@ -210,8 +210,7 @@ def galerkin_solve(
 		in_axes=1
 	)(bases, dbases, bases_bdry)
 
-	# sol_coeff, _, _, _ = jnp.linalg.lstsq(K, F) # Get solution coefficients
-	sol_coeff = jnp.linalg.solve(K ,F)
+	sol_coeff, _, _, _ = jnp.linalg.lstsq(K, F) # Get solution coefficients
 	return sol_coeff
 
 
@@ -254,7 +253,6 @@ def galerkin_lsq(
 	coeff, _, _, _ = jnp.linalg.lstsq(K, F)
 	return coeff
 
-@partial(jax.jit, static_argnames=["activation"])
 def loss_fn(
 	params: optax.Params,
 	u: jax.Array,
@@ -286,7 +284,7 @@ def loss_fn(
 	v_nn = net_proj(X=X.reshape(-1, X.ndim), params=params, activation=activation, coeff=v_nn_coeff)
 	v_nn_bdry = net_proj(X=X_bdry.reshape(-1, X.ndim), params=params, activation=activation, coeff=v_nn_coeff)
 	dv_nn = dnet_proj(X.reshape(-1, X.ndim), params, activation, v_nn_coeff).squeeze()
-
+	# Loss
 	loss = error_eta(
 		u=u,
 		du=du,
@@ -300,8 +298,7 @@ def loss_fn(
 	)
 	return -jnp.abs(loss), v_nn_coeff  # It is maximizing!
 
-
-# @partial(jax.jit, static_argnums=(0, 11))
+@partial(jax.jit, static_argnames=["optimizer", "activation"])
 def train_step(
 	optimizer: optax.GradientTransformation,
 	opt_state: optax.OptState,
@@ -349,14 +346,16 @@ def augment_basis(
 	tol_basis: float,
 	key: PRNGKeyArray,
 ):
-	print(f"Activation(inf): {jax.grad(activation)(0.0)}")
+	print(f"d/dx Activation(0): {jax.grad(activation)(0.0)}")
 	print(f"Neurons: {neurons}")
 	print(f"Learning Rate: {learning_rate}")
 	optimizer = optax.adam(learning_rate=learning_rate)
 	key_W, key_b = jax.random.split(key, num=2)
+	# initializer_W = jax.nn.initializers.glorot_normal()
 	params = {
-		'W': jnp.ones(shape=(1, neurons)),
-		# "W": jax.random.normal(shape=(1, neurons), key=key_W),
+		# "W": jnp.ones(shape=(1, neurons)),
+		# "W": initializer_W(key=key_W, shape=(1, neurons)),
+		"W": jax.random.normal(shape=(1, neurons), key=key_W),
 		"b": - jnp.linspace(0, 1, neurons),
 	}
 	opt_state = optimizer.init(params)
@@ -589,11 +588,11 @@ if __name__ == "__main__":
 	network_widths_fn = lambda i: N * r ** (i - 1)
 	learning_rates_fn = lambda i: A * rho ** (-(i - 1))
 
-	max_bases = 5
-	max_epoch_basis = 100
+	max_bases = 8
+	max_epoch_basis = 1000
 	tol_solution = 1e-9
 	tol_basis = 1e-9
-	seed = 1
+	seed = 42
 
 	(
 		eta_errors,
@@ -645,7 +644,7 @@ if __name__ == "__main__":
 	ax.plot(X_test, u_pred, label="estimated")
 	ax.legend()
 	fig.savefig("solution.png")
-	fig.show()
+	# fig.show()
 
 
 
@@ -659,8 +658,8 @@ if __name__ == "__main__":
 	f_bdry = source(X_bdry)
 	inner = inner_product(u, f, XW_test)
 	bilinear = bilinear_op(u=u, du=du, u_bdry=u_bdry, v=f, dv=df, v_bdry=f_bdry, XW=XW_test, XW_bdry=XW_bdry)
-	print(inner)
-	print(bilinear)
+	# print(inner)
+	# print(bilinear)
 
 
 	# %%
