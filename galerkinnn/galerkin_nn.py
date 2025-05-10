@@ -209,7 +209,6 @@ def galerkin_solve(
 		)(bases, dbases, bases_bdry),
 		in_axes=1
 	)(bases, dbases, bases_bdry)
-
 	sol_coeff, _, _, _ = jnp.linalg.lstsq(K, F) # Get solution coefficients
 	return sol_coeff
 
@@ -249,7 +248,8 @@ def galerkin_lsq(
 		)(net, dnet, net_bdry),
 		in_axes=1
 	)(net, dnet, net_bdry)
-
+	print(K.shape)
+	# print(F.shape)
 	coeff, _, _, _ = jnp.linalg.lstsq(K, F)
 	return coeff
 
@@ -454,6 +454,8 @@ def augment_basis(
 def adaptive_subspace(
 	xbounds: Tuple[float, float],
 	source: Callable[[jax.Array], jax.Array],
+	# linear_op: Callable[[jax.Array], jax.Array],
+	# bilinear_op: Callable[[jax.Array], jax.Array],
 	u0: Callable[[jax.Array], jax.Array],
 	du0: Callable[[jax.Array], jax.Array],
 	n_train: int,
@@ -570,7 +572,7 @@ if __name__ == "__main__":
 	du0 = lambda X: jnp.zeros_like(X)
 
 	# NN
-	n_train = 1024
+	n_train = 512
 	n_val = 1024
 	N = 5  # Init Neurons
 	r = 2  # Neurons Growth
@@ -589,11 +591,13 @@ if __name__ == "__main__":
 	learning_rates_fn = lambda i: A * rho ** (-(i - 1))
 
 	max_bases = 8
-	max_epoch_basis = 1000
+	max_epoch_basis = 50
 	tol_solution = 1e-9
 	tol_basis = 1e-9
 	seed = 42
+	import time
 
+	start = time.perf_counter()
 	(
 		eta_errors,
 		solution_coeffs,
@@ -620,7 +624,9 @@ if __name__ == "__main__":
 		tol_basis=tol_basis,
 		seed=seed,
 	)
-
+	end = time.perf_counter()
+	elapsed = end - start
+	print(f"Elapsed time: {elapsed:.6f} seconds")
 
 	def solution(X: jax.Array):
 		u1 = jnp.sin(2 * jnp.pi * X)
@@ -628,7 +634,7 @@ if __name__ == "__main__":
 		u3 = 5.0 * jnp.pi * eps * (10 * eps - 8 * X + 9) / (20 * eps + 10)
 		return u1 + u2 + u3
 
-	n_test = 512
+	n_test = 128
 	X_test, XW_test = gauss_lengendre_quad(xbounds, n_test)
 	X_bdry = jnp.array(xbounds, dtype=float)
 	XW_bdry = jnp.array([1.0, 1.0])
@@ -643,8 +649,8 @@ if __name__ == "__main__":
 	ax.plot(X_test, u_actual, label="actual")
 	ax.plot(X_test, u_pred, label="estimated")
 	ax.legend()
+	fig.show()
 	fig.savefig("solution.png")
-	# fig.show()
 
 
 
