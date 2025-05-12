@@ -15,7 +15,7 @@ class FunctionState:
   boundary: jax.Array | None = None# shape (num_boundary,)
   grad_boundary: jax.Array | None = None# shape (num_boundary, dim)
 
-
+@jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class PDE(ABC):
   """Base class for all PDE."""
@@ -128,5 +128,5 @@ class PDE(ABC):
         XW=XW,
         XW_bdry=XW_bdry
       )
-      return res / norm_v
+      return res / (norm_v + 1e-12)
     return _error_eta

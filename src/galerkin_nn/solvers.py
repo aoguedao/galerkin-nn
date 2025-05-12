@@ -2,10 +2,14 @@ import jax
 import jax.numpy as jnp
 import optax
 
+from functools import partial
 from typing import Callable, Sequence, Tuple
 
 from .domain import Quadrature
 from .pde import FunctionState
+
+jax.config.update("jax_enable_x64", True)
+
 
 class GalerkinNN1D:
 
@@ -52,23 +56,23 @@ class GalerkinNN1D:
     self.bases_train : Sequence[FunctionState] = []
     self.solution_coeffs: Sequence[jax.Array] = []
 
-    source = self.pde.source()
-    galerkin_solve = self.galerkin_solve()
+    _source = self.pde.source()
+    _galerkin_solve = self.galerkin_solve()
 
     # Basis step loop
     basis_step = 0
     quad_train = self.pde.domain.quadrature(
-      name=self.quad_name,
-      degree=self.num_train
+      degree=self.num_train,
+      name=self.quad_name
     )
-    f_train = source(X=quad_train.interior)
+    f_train = _source(X=quad_train.interior)
     u_train = FunctionState(
       interior=self.u0(X=quad_train.interior),
       grad_interior=self.du0(X=quad_train.interior),
       boundary=self.u0(X=quad_train.boundary)
     )
 
-    error_indicator = 1e10
+    error_indicator = 1
     while (error_indicator > self.tol_solution) and (basis_step < self.max_bases):
       print(f"Basis Step: {basis_step + 1}")
 
@@ -106,7 +110,7 @@ class GalerkinNN1D:
       )
 
       # Solution coefficients
-      sol_coeff, sol_stiffness = galerkin_solve(
+      sol_coeff, stiffness = _galerkin_solve(
         bases=bases_train_int,
         bases_bdry=bases_train_bdry,
         dbases=dbases_train_int,
@@ -133,56 +137,58 @@ class GalerkinNN1D:
     init_params: optax.Params,
     optimizer: optax.GradientTransformation,
   ):
-    error_eta = self.pde.error_eta()
-
+    # Gradient neural network
+    dnet_vmap = jax.vmap(jax.jacobian(net_fn, argnums=0), in_axes=(0, None))
     def dnet_fn(X: jax.Array, params: optax.Params):
-      dnet = jax.vmap(jax.jacobian(net_fn, argnums=0), in_axes=(0, None))
-      return dnet(X, params).squeeze()
+      return dnet_vmap(X, params).squeeze()
 
+    # Jitabble loss function that returns coefficients as well
+    _loss_fn = self.loss_fn(net_fn=net_fn, dnet_fn=dnet_fn)
     loss_coeff_and_gradloss = jax.jit(
       jax.value_and_grad(
-        self.loss_fn(net_fn=net_fn, dnet_fn=dnet_fn),
+        _loss_fn,
         argnums=0,
         has_aux=True
       )
     )
-
+    # Training
     params = init_params
     opt_state = optimizer.init(params)
-    loss_prev = 1e10
+    loss_prev = 1
+    (loss, net_coeff), grads = loss_coeff_and_gradloss(params, domain_quad, u, f)
+    # print(f"Initial loss: {loss:.4e}, grad {grads}")
     for i in range(self.max_epoch_per_basis):
-      (loss, net_coeff), grads = loss_coeff_and_gradloss(
-        params,
-        domain_quad,
-        u,
-        f
-      )
+      (loss, net_coeff), grads = loss_coeff_and_gradloss(params, domain_quad, u, f)
       updates, opt_state = optimizer.update(grads, opt_state, params)
       params = optax.apply_updates(params, updates)
       if i % (self.max_epoch_per_basis // 10) == 0:
-        print(f'step {i}, loss: {- loss.item()}')
+        print(f"step {i}, loss: {- float(loss)}, grad norm: {optax.global_norm(grads):.4e}")
       if jnp.abs((loss - loss_prev) / loss_prev) < self.tol_basis:
         break
       else:
         loss_prev = loss
 
-    @jax.jit
-    def basis_fn(X: jax.Array):
+    # Basis functions
+    def basis_fn(X: jax.Array, params, coeff):
       net = net_fn(X, params)
-      return jnp.dot(net, net_coeff)
+      return jnp.dot(net, coeff)
 
-    @jax.jit
-    def dbasis_fn(X):
+    def dbasis_fn(X, params, coeff):
       dnet = dnet_fn(X, params)
-      return jnp.dot(dnet, net_coeff)
+      return jnp.dot(dnet, coeff)
+
+    _basis_fn = partial(basis_fn, params=params, coeff=net_coeff)
+    _dbasis_fn = partial(dbasis_fn, params=params, coeff=net_coeff)
 
     basis = FunctionState(
-      interior=basis_fn(domain_quad.interior[:, jnp.newaxis]),
-      grad_interior=dbasis_fn(domain_quad.interior[:, jnp.newaxis]),
-      boundary=basis_fn(domain_quad.boundary[:, jnp.newaxis]),
+      interior=_basis_fn(domain_quad.interior[:, jnp.newaxis]),
+      grad_interior=_dbasis_fn(domain_quad.interior[:, jnp.newaxis]),
+      boundary=_basis_fn(domain_quad.boundary[:, jnp.newaxis]),
     )
 
-    eta = error_eta(
+    # Compute error
+    _error_eta = self.pde.error_eta()
+    eta = _error_eta(
       u=u.interior,
       du=u.grad_interior,
       u_bdry=u.boundary,
@@ -194,33 +200,28 @@ class GalerkinNN1D:
       XW_bdry=domain_quad.boundary_weights
     )
 
-    return eta, params, net_coeff, basis_fn, dbasis_fn, basis
-
-  # @staticmethod
-  # def linear_combination(bases, coeff):
-  #   return jnp.dot(bases, coeff)
+    return eta, params, net_coeff, _basis_fn, _dbasis_fn, basis
 
   def solution_fn(self):
-    basis_fns = self.basis_fns
-    coeff = self.solution_coeffs
-    @jax.jit
+    _basis_fns = self.basis_fns
+    _coeff = self.solution_coeffs[-1]
     def _solution_fn(X: jax.Array) -> jax.Array:
       bases = jnp.stack(
         [
-          basis_fn(X) for basis_fn in basis_fns
+          basis_fn(X) for basis_fn in _basis_fns
         ],
         axis=1
       )
-      return jnp.dot(bases, coeff)
+      return jnp.dot(bases, _coeff)
     return _solution_fn
 
   def galerkin_solve(self) -> Callable:
     _linear_operator = self.pde.linear_operator()
     _bilinear_form = self.pde.bilinear_form()
     def _galerkin_solve(
-      bases: Sequence[jax.Array],
-      bases_bdry: Sequence[jax.Array],
-      dbases: Sequence[jax.Array],
+      bases: jax.Array,
+      bases_bdry: jax.Array,
+      dbases: jax.Array,
       f: jax.Array,
       XW: jax.Array,
       XW_bdry: jax.Array,
@@ -243,7 +244,7 @@ class GalerkinNN1D:
         )(bases, dbases, bases_bdry),
         in_axes=1
       )(bases, dbases, bases_bdry)
-      sol_coeff, _, _, _ = jnp.linalg.lstsq(K, F) # Get solution coefficients
+      sol_coeff, _, _, _ = jnp.linalg.lstsq(K, F)
       return sol_coeff, K
     return _galerkin_solve
 
@@ -293,6 +294,8 @@ class GalerkinNN1D:
   def loss_fn(self, net_fn, dnet_fn) -> Callable:
     _galerkin_lsq = self.galerkin_lsq()
     _error_eta = self.pde.error_eta()
+    _net_fn = net_fn
+    _dnet_fn = dnet_fn
     def _loss_fn(
       params: optax.Params,
       domain_quad: Quadrature,
@@ -302,9 +305,9 @@ class GalerkinNN1D:
       X_int_tensor = domain_quad.interior[:, jnp.newaxis]
       X_bdry_tensor = domain_quad.boundary[:, jnp.newaxis]
       net = FunctionState(
-        interior=net_fn(X_int_tensor, params),
-        grad_interior=dnet_fn(X_int_tensor, params),
-        boundary=net_fn(X_bdry_tensor, params)
+        interior=_net_fn(X_int_tensor, params),
+        grad_interior=_dnet_fn(X_int_tensor, params),
+        boundary=_net_fn(X_bdry_tensor, params)
       )
       v_nn_coeff = _galerkin_lsq(
         u=u.interior,
@@ -328,5 +331,150 @@ class GalerkinNN1D:
         XW=domain_quad.interior_weights,
         XW_bdry=domain_quad.boundary_weights,
       )
-      return -jnp.abs(loss), v_nn_coeff  # It is maximizing!
+      return -loss, v_nn_coeff  # It is maximizing!
     return _loss_fn
+
+
+
+
+# def inner_product(u: jax.Array, v: jax.Array, XW: jax.Array) -> float:
+# 	return jnp.sum(XW * u * v)
+
+
+# def linear_op(f: jax.Array, v: jax.Array, XW: jax.Array) -> float:
+# 	return inner_product(u=f, v=v, XW=XW)
+
+
+# def bilinear_op(
+# 	u: jax.Array,
+# 	du: jax.Array,
+# 	u_bdry: jax.Array,
+# 	v: jax.Array,
+# 	dv: jax.Array,
+# 	v_bdry: jax.Array,
+# 	XW: jax.Array,
+# 	XW_bdry: jax.Array
+# ) -> float:
+# 	a1 = inner_product(u=du, v=dv, XW=XW)
+# 	a2 = inner_product(u=u_bdry, v=v_bdry, XW=XW_bdry)
+# 	eps = 1e-3
+# 	return a1 + a2 / eps
+
+
+# def norm(
+# 	v: jax.Array,
+# 	dv: jax.Array,
+# 	v_bdry: jax.Array,
+# 	XW: jax.Array,
+# 	XW_bdry: jax.Array
+# ) -> float:
+# 	"""
+# 	Norm |||v|||
+# 	"""
+# 	a = bilinear_op(
+# 		u=v,
+# 		v=v,
+# 		du=dv,
+# 		dv=dv,
+# 		u_bdry=v_bdry,
+# 		v_bdry=v_bdry,
+# 		XW=XW,
+# 		XW_bdry=XW_bdry
+# 	)
+# 	return jnp.sqrt(a)
+
+
+# def residual(
+# 	u: jax.Array,
+# 	du: jax.Array,
+# 	u_bdry: jax.Array,
+# 	v: jax.Array,
+# 	dv: jax.Array,
+# 	v_bdry: jax.Array,
+# 	f: jax.Array,
+# 	XW: jax.Array,
+# 	XW_bdry: jax.Array
+# ) -> float:
+# 	"""
+# 	Residual L(v) - a(u, v)
+# 	"""
+# 	L_v = linear_op(f=f, v=v, XW=XW)
+# 	a_uv = bilinear_op(
+# 		u=u,
+# 		v=v,
+# 		du=du,
+# 		dv=dv,
+# 		u_bdry=u_bdry,
+# 		v_bdry=v_bdry,
+# 		XW=XW,
+# 		XW_bdry=XW_bdry
+# 	)
+# 	return L_v - a_uv
+
+
+# def error_eta(
+# 	u: jax.Array,
+# 	du: jax.Array,
+# 	u_bdry: jax.Array,
+# 	v: jax.Array,
+# 	dv: jax.Array,
+# 	v_bdry: jax.Array,
+# 	f: jax.Array,
+# 	XW: jax.Array,
+# 	XW_bdry: jax.Array
+# ) -> float:
+# 	r"""Error approximation
+# 	$$ \eta(u, v) = <r(u), v> / |||v||| = (L(v) - a(u, v)) / |||v||| $$
+# 	"""
+# 	norm_v = norm(
+# 		v=v,
+# 		dv=dv,
+# 		v_bdry=v_bdry,
+# 		XW=XW,
+# 		XW_bdry=XW_bdry
+# 	)
+# 	res = residual(
+# 		u=u,
+# 		du=du,
+# 		u_bdry=u_bdry,
+# 		v=v,
+# 		dv=dv,
+# 		v_bdry=v_bdry,
+# 		f=f,
+# 		XW=XW,
+# 		XW_bdry=XW_bdry
+# 	)
+# 	return res / norm_v
+
+
+
+# # Galerkin Schemes
+# def my_galerkin_solve(
+# 	bases: Sequence[jax.Array],
+# 	bases_bdry: Sequence[jax.Array],
+# 	dbases: Sequence[jax.Array],
+# 	f: jax.Array,
+# 	XW: jax.Array,
+# 	XW_bdry: jax.Array,
+# ) -> jax.Array:
+
+# 	F = jax.vmap(lambda v : linear_op(f=f, v=v, XW=XW), in_axes=1)(bases)
+# 	K = jax.vmap(
+# 		lambda phi_i, dphi_i, phi_bdry_i: jax.vmap(
+# 			lambda phi_j, dphi_j, phi_bdry_j: bilinear_op(
+# 				u=phi_i,
+# 				du=dphi_i,
+# 				u_bdry=phi_bdry_i,
+# 				v=phi_j,
+# 				dv=dphi_j,
+# 				v_bdry=phi_bdry_j,
+# 				XW=XW,
+# 				XW_bdry=XW_bdry
+# 			),
+# 			in_axes=1
+# 		)(bases, dbases, bases_bdry),
+# 		in_axes=1
+# 	)(bases, dbases, bases_bdry)
+# 	sol_coeff, _, _, _ = jnp.linalg.lstsq(K, F) # Get solution coefficients
+# 	return sol_coeff
+
