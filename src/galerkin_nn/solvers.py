@@ -2,7 +2,6 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from functools import partial
 from typing import Callable, Sequence, Tuple
 
 from .domain import Quadrature
@@ -140,7 +139,7 @@ class GalerkinNN1D:
     # Gradient neural network
     dnet_vmap = jax.vmap(jax.jacobian(net_fn, argnums=0), in_axes=(0, None))
     def dnet_fn(X: jax.Array, params: optax.Params):
-      return dnet_vmap(X, params).squeeze()
+      return dnet_vmap(X, params)
 
     # Jitabble loss function that returns coefficients as well
     _loss_fn = self.loss_fn(net_fn=net_fn, dnet_fn=dnet_fn)
@@ -151,6 +150,7 @@ class GalerkinNN1D:
         has_aux=True
       )
     )
+
     # Training
     params = init_params
     opt_state = optimizer.init(params)
@@ -159,7 +159,7 @@ class GalerkinNN1D:
     # print(f"Initial loss: {loss:.4e}, grad {grads}")
     for i in range(self.max_epoch_per_basis):
       (loss, net_coeff), grads = loss_coeff_and_gradloss(params, domain_quad, u, f)
-      updates, opt_state = optimizer.update(grads, opt_state, params)
+      updates, opt_state = optimizer.update(grads, opt_state)
       params = optax.apply_updates(params, updates)
       if i % (self.max_epoch_per_basis // 10) == 0:
         print(f"step {i}, loss: {- float(loss)}, grad norm: {optax.global_norm(grads):.4e}")
@@ -169,16 +169,18 @@ class GalerkinNN1D:
         loss_prev = loss
 
     # Basis functions
-    def basis_fn(X: jax.Array, params, coeff):
-      net = net_fn(X, params)
-      return jnp.dot(net, coeff)
+    def make_basis_fn(params, coeff, net_fn):
+      def basis_fn(X):
+        return jnp.dot(net_fn(X, params), coeff)
+      return basis_fn
 
-    def dbasis_fn(X, params, coeff):
-      dnet = dnet_fn(X, params)
-      return jnp.dot(dnet, coeff)
+    def make_dbasis_fn(params, coeff, dnet_fn):
+      def dbasis_fn(X):
+        return jnp.dot(dnet_fn(X, params).squeeze(-1), coeff)
+      return dbasis_fn
 
-    _basis_fn = partial(basis_fn, params=params, coeff=net_coeff)
-    _dbasis_fn = partial(dbasis_fn, params=params, coeff=net_coeff)
+    _basis_fn = make_basis_fn(params, net_coeff, net_fn)
+    _dbasis_fn = make_dbasis_fn(params, net_coeff, dnet_fn)
 
     basis = FunctionState(
       interior=_basis_fn(domain_quad.interior[:, jnp.newaxis]),
@@ -306,7 +308,7 @@ class GalerkinNN1D:
       X_bdry_tensor = domain_quad.boundary[:, jnp.newaxis]
       net = FunctionState(
         interior=_net_fn(X_int_tensor, params),
-        grad_interior=_dnet_fn(X_int_tensor, params),
+        grad_interior=_dnet_fn(X_int_tensor, params).squeeze(axis=-1),
         boundary=_net_fn(X_bdry_tensor, params)
       )
       v_nn_coeff = _galerkin_lsq(

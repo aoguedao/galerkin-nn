@@ -11,9 +11,9 @@ from .domain import Geometry
 @dataclass(frozen=True)
 class FunctionState:
   interior: jax.Array  # shape (num_interior, )
-  grad_interior: jax.Array | None = None # shape (num_interior, dim)
-  boundary: jax.Array | None = None# shape (num_boundary,)
-  grad_boundary: jax.Array | None = None# shape (num_boundary, dim)
+  grad_interior: jax.Array # shape (num_interior, dim)
+  boundary: jax.Array # shape (num_boundary,)
+  # grad_boundary: jax.Array = jnp.array([])# shape (num_boundary, dim)
 
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
