@@ -700,5 +700,5 @@ for t in t_array:
       return u
     return solution
 
-  u_prev = make_solution(coeff=solution_coeffs, basis_fns=basis_fns)
+  u_prev = make_solution(coeff=solution_coeffs[-1], basis_fns=basis_fns)
   break
