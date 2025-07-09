@@ -602,7 +602,7 @@ if __name__ == "__main__":
   xbounds = 0.0, 1.0
   tbounds = 0.0, 1.0
   u_initial = lambda x: 0.0
-  t_step = 0.01
+  t_step = 0.05
 
   # NN
   n_train = 512
@@ -693,6 +693,7 @@ for t in t_array:
   end = time.perf_counter()
   elapsed = end - start
   print(f"Elapsed time: {elapsed:.6f} seconds")
+
   def make_solution(coeff, basis_fns):
     def solution(X: jax.Array):
       bases = [basis_fn(X) for basis_fn in basis_fns]
@@ -701,4 +702,3 @@ for t in t_array:
     return solution
 
   u_prev = make_solution(coeff=solution_coeffs[-1], basis_fns=basis_fns)
-  break
