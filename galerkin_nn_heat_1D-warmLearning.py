@@ -1,11 +1,10 @@
-#warm learning 
+#warm learning - v3
 # %%
 import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
 import time
-
 import matplotlib.pyplot as plt
 
 from functools import partial
@@ -389,7 +388,7 @@ def augment_basis(
 
   loss_prev = 1 #? why not big number
   epoch_used = max_epoch
-
+  start = time.perf_counter()
   for i in range(max_epoch):
     opt_state, params, loss, coeff, grads = train_step(
       optimizer=optimizer,
@@ -406,6 +405,7 @@ def augment_basis(
       activation=activation,
     )
 
+
     # if i % (max_epoch // 10) == 0:
     #   print(f"step {i}, loss: {- float(loss)}, grad norm: {optax.global_norm(grads):.4e}")
     if jnp.abs((loss - loss_prev) / loss_prev) < tol_basis:
@@ -413,10 +413,11 @@ def augment_basis(
       break
     else:
       loss_prev = loss
-
+  end = time.perf_counter()
   print(f"epoch used: {epoch_used}")
   print(f"final eta: {- float(loss)}")
-  print(" ")
+  print(f"time used: {end - start}")
+
   # Get the final basis
   net = single_net(X=X.reshape(-1, X.ndim), params=params, activation=activation)
   net_bdry = single_net(X=X_bdry.reshape(-1, X.ndim), params=params, activation=activation)
@@ -603,7 +604,7 @@ def adaptive_subspace(
     bstep += 1
     error = jnp.abs(eta)
     print(f"Eta error: {error}")
-
+    print(" ")
   return (
     eta_errors,
     solution_coeffs,
@@ -648,11 +649,11 @@ if __name__ == "__main__":
   # PDE
   xbounds = 0.0, 1.0
   tbounds = 0.0, 1.0
-  u_initial = lambda X: 15.0 * jnp.sin(jnp.pi * X)+3.0*jnp.sin(5 * jnp.pi * X) + 1.5 * jnp.sin(10*jnp.pi*X)+1.0*jnp.sin(15*jnp.pi*X)
+  u_initial = lambda x: 20 * jnp.sin(jnp.pi * x) + 10 * jnp.sin(5 * jnp.pi * x) + 5 * jnp.cos(7 * jnp.pi * x)+ 2.5 * jnp.sin(15 * jnp.pi * x) + jnp.cos(30 * jnp.pi * x)
 
 
-  #1* jnp.sin(1 * jnp.pi * X) + (1/3) * jnp.sin(3 * jnp.pi * X) + (1/5) * jnp.sin(5 * jnp.pi * X) + (1/7) * jnp.sin(7 * jnp.pi * X)
-  #15.0 * jnp.sin(jnp.pi * X)+3.0*jnp.sin(5 * jnp.pi * X) + 1.5 * jnp.sin(10*jnp.pi*X)+1.0*jnp.sin(15*jnp.pi*X)
+  #1: 1* jnp.sin(1 * jnp.pi * X) + (1/3) * jnp.sin(3 * jnp.pi * X) + (1/5) * jnp.sin(5 * jnp.pi * X) + (1/7) * jnp.sin(7 * jnp.pi * X)
+  #2:  15.0 * jnp.sin(jnp.pi * X)+3.0*jnp.sin(5 * jnp.pi * X) + 1.5 * jnp.sin(10*jnp.pi*X)+1.0*jnp.sin(15*jnp.pi*X)
 
   n_test = 128
   X_test, XW_test = gauss_lengendre_quad(xbounds, n_test)
@@ -674,7 +675,7 @@ if __name__ == "__main__":
       return jnp.tanh(scale_i * x)
     return activation
 
-  network_widths_fn = lambda i: N * r ** (i - 1)
+  network_widths_fn = lambda i: N * r ** (i - 1) #100 if i <= 4 else 200 #
   learning_rates_fn = lambda i: A * rho ** (-(i - 1))
 
   max_bases = 6
@@ -698,19 +699,24 @@ if __name__ == "__main__":
     t_steps = jnp.diff(times)
     return times, t_steps
 
-  def uniform_time_grid(a, N): #t_step = a/N t_step
+  def uniform_time_grid(a, N): #t_step = a/N 
     times = jnp.linspace(0, a, N + 1)
     t_steps = jnp.diff(times)
     return times, t_steps
 
   def solution(x: jax.Array, t):
-    pi2 = jnp.pi**2
-    return (
-        15.0 * jnp.sin(jnp.pi * x) * jnp.exp(-alpha * pi2 * t) +
-         3.0 * jnp.sin(5 * jnp.pi * x) * jnp.exp(-alpha * 25 * pi2 * t) +
-         1.5 * jnp.sin(10 * jnp.pi * x) * jnp.exp(-alpha * 100 * pi2 * t) +
-         1.0 * jnp.sin(15 * jnp.pi * x) * jnp.exp(-alpha * 225 * pi2 * t)
-    )
+    return (20 * jnp.exp(-alpha * (jnp.pi)**2 * t) * jnp.sin(jnp.pi * x) +
+            10 * jnp.exp(-alpha * (5 * jnp.pi)**2 * t) * jnp.sin(5 * jnp.pi * x) +
+            5  * jnp.exp(-alpha * (7 * jnp.pi)**2 * t) * jnp.cos(7 * jnp.pi * x) +
+            2.5* jnp.exp(-alpha * (15 * jnp.pi)**2 * t) * jnp.sin(15 * jnp.pi * x) +
+            1  * jnp.exp(-alpha * (30 * jnp.pi)**2 * t) * jnp.cos(30 * jnp.pi * x))
+    #pi2 = jnp.pi**2
+    #2: return (
+    #     15.0 * jnp.sin(jnp.pi * x) * jnp.exp(-alpha * pi2 * t) +
+    #      3.0 * jnp.sin(5 * jnp.pi * x) * jnp.exp(-alpha * 25 * pi2 * t) +
+    #      1.5 * jnp.sin(10 * jnp.pi * x) * jnp.exp(-alpha * 100 * pi2 * t) +
+    #      1.0 * jnp.sin(15 * jnp.pi * x) * jnp.exp(-alpha * 225 * pi2 * t)
+    # )
 
   # def solution(X: jax.Array):
   #   u1 = jnp.sin(2 * jnp.pi * X)
@@ -747,8 +753,8 @@ times, t_steps = uniform_time_grid(a=1.0, N=10)
 
 
 u_prev = u_initial
-prev_bases_params =[]
-prev_opt_states = []
+prev_bases_params = []#init_bases_params[:]
+prev_opt_states = []#init_opt_states[:]
 
 time_avg = 0
 start_total = time.perf_counter()
@@ -806,7 +812,7 @@ for i in range(0,len(t_steps)):
 
   u_prev = make_solution(coeff=solution_coeffs[-1], basis_fns=basis_fns)
 
-  prev_bases_params = bases_params
+  prev_bases_params = bases_params[:]
   prev_opt_states = opt_states
 
   u_pred = u_prev(X_test)
@@ -814,7 +820,6 @@ for i in range(0,len(t_steps)):
   #plot
   print(" ")
   fig, ax = plt.subplots()
-  #u_pred = solution_pred(X=X_test, coeff=solution_coeffs[-1], basis_fns=basis_fns[:])
   ax.plot(X_test, u_pred, label="estimated")
   ax.plot(X_test, u_actual, label="actual")
   #ax.plot(X_test,u_initial(X_test), label="initial")
