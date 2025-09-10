@@ -1,0 +1,12 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "galerkinnn"
+version = "0.0.0"
+requires-python = ">=3.10"
+
+[tool.hatch.build.targets.wheel]
+# point to the *path* of your package folder as a string
+packages = ["src/galerkinnn"]

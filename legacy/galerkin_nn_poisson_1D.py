@@ -687,53 +687,53 @@ if __name__ == "__main__":
 
   # %%
   # Check inner products
-  u = solution(X_test)
-  du = jax.vmap(jax.grad(solution))(X_test)
-  u_bdry = solution(X_bdry)
-  f = source(X_test)
-  df = jax.vmap(jax.grad(source))(X_test)
-  f_bdry = source(X_bdry)
-  inner = inner_product(u, f, XW_test)
-  bilinear = bilinear_op(u=u, du=du, u_bdry=u_bdry, v=f, dv=df, v_bdry=f_bdry, XW=XW_test, XW_bdry=XW_bdry)
-  # print(inner)
-  # print(bilinear)
+  # u = solution(X_test)
+  # du = jax.vmap(jax.grad(solution))(X_test)
+  # u_bdry = solution(X_bdry)
+  # f = source(X_test)
+  # df = jax.vmap(jax.grad(source))(X_test)
+  # f_bdry = source(X_bdry)
+  # inner = inner_product(u, f, XW_test)
+  # bilinear = bilinear_op(u=u, du=du, u_bdry=u_bdry, v=f, dv=df, v_bdry=f_bdry, XW=XW_test, XW_bdry=XW_bdry)
+  # # print(inner)
+  # # print(bilinear)
 
 
-  # %%
-  # Check norms
-  for i in range(len(dbasis_fns)):
-    phi = basis_fns[i](X_test)
-    dphi = dbasis_fns[i](X_test)
-    phi_bdry = basis_fns[i](X_bdry)
-    phi_norm = norm(v=phi, dv=dphi, v_bdry=phi_bdry, XW=XW_test, XW_bdry=XW_bdry)
-    print(phi_norm)
+#   # %%
+#   # Check norms
+#   for i in range(len(dbasis_fns)):
+#     phi = basis_fns[i](X_test)
+#     dphi = dbasis_fns[i](X_test)
+#     phi_bdry = basis_fns[i](X_bdry)
+#     phi_norm = norm(v=phi, dv=dphi, v_bdry=phi_bdry, XW=XW_test, XW_bdry=XW_bdry)
+#     print(phi_norm)
 
-# %%
-# check loss
-key = jax.random.key(seed)
-xa, xb = xbounds
-X_train, XW_train = gauss_lengendre_quad((xa, xb), n_train)
-X_val, XW_val = gauss_lengendre_quad((xa, xb), n_val)
-X_bdry = jnp.array([xa, xb])
-XW_bdry = jnp.array([1.0, 1.0])  # Hardcoded for now
-f_train = source(X_train)
-u_train = u0(X_train)
-du_train = du0(X_train)
-u_bdry = u0(X_bdry)
-bstep = 1
-activation = activations_fn(bstep)
-neurons = network_widths_fn(bstep)
-learning_rate = learning_rates_fn(bstep)
-optimizer = optax.adam(learning_rate=learning_rate)
-key_W, key_b = jax.random.split(key, num=2)
-# initializer_W = jax.nn.initializers.glorot_normal()
-params = {
-  "W": jnp.ones(shape=(1, neurons)),
-  # "W": initializer_W(key=key_W, shape=(1, neurons)),
-  # "W": jax.random.normal(shape=(1, neurons), key=key_W),
-  "b": - jnp.linspace(0, 1, neurons),
-}
-opt_state = optimizer.init(params)
+# # %%
+# # check loss
+# key = jax.random.key(seed)
+# xa, xb = xbounds
+# X_train, XW_train = gauss_lengendre_quad((xa, xb), n_train)
+# X_val, XW_val = gauss_lengendre_quad((xa, xb), n_val)
+# X_bdry = jnp.array([xa, xb])
+# XW_bdry = jnp.array([1.0, 1.0])  # Hardcoded for now
+# f_train = source(X_train)
+# u_train = u0(X_train)
+# du_train = du0(X_train)
+# u_bdry = u0(X_bdry)
+# bstep = 1
+# activation = activations_fn(bstep)
+# neurons = network_widths_fn(bstep)
+# learning_rate = learning_rates_fn(bstep)
+# optimizer = optax.adam(learning_rate=learning_rate)
+# key_W, key_b = jax.random.split(key, num=2)
+# # initializer_W = jax.nn.initializers.glorot_normal()
+# params = {
+#   "W": jnp.ones(shape=(1, neurons)),
+#   # "W": initializer_W(key=key_W, shape=(1, neurons)),
+#   # "W": jax.random.normal(shape=(1, neurons), key=key_W),
+#   "b": - jnp.linspace(0, 1, neurons),
+# }
+# opt_state = optimizer.init(params)
 # loss = loss_fn(
 #   params=params,
 #   u=u_train,
