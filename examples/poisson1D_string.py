@@ -110,7 +110,7 @@ import time
 start = time.perf_counter()
 
 solver = GalerkinNN(pde, quad)
-solution = solver.solve(
+u, u_coeff, eta_errors, basis_list, basis_params_list, basis_coeff_list, sigma_net_fn_list = solver.solve(
   seed=seed,
   u0=u0,
   net_fn=net_fn,
@@ -137,7 +137,7 @@ def u_sol(X: jax.Array):
   return u1 + u2 + u3 + ur
 
 u_actual = u_sol(quad.interior_x)
-u_pred = solution[0].interior
+u_pred = u.interior
 fig, ax = plt.subplots()
 ax.plot(quad.interior_x, u_actual, label="actual")
 ax.plot(quad.interior_x, u_pred, label="estimated")

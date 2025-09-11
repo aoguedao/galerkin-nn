@@ -9,33 +9,25 @@ from scipy.special import roots_jacobi, eval_jacobi
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class Quadrature:
-  ng: int
   dim: int
-  interior_x: jax.Array      # (N_interior, dim)
-  interior_w: jax.Array      # (N_interior,)
-  boundary_x: jax.Array      # (N_boundary, dim)
-  boundary_w: jax.Array      # (N_boundary,)
-  boundary_tangent: jax.Array  # (N_boundary, dim)
-  boundary_normal: jax.Array   # (N_boundary, dim)
+  shape: Tuple[int, ...]                 # (ng,) for 1D, (nr, nt) for 2D disk, etc.
+  interior_x: jax.Array                  # (N_interior, dim)
+  interior_w: jax.Array                  # (N_interior,)
+  boundary_x: jax.Array                  # (N_boundary, dim)
+  boundary_w: jax.Array                  # (N_boundary,)
+  boundary_tangent: jax.Array            # (N_boundary, dim)
+  boundary_normal: jax.Array             # (N_boundary, dim)
 
   def integrate_interior(self, values: jax.Array) -> jax.Array:
-    # if values.ndim == 1:
-    #   return jnp.sum(values * self.interior_w)
-    # else:
-    #   return jnp.sum(values * self.interior_w[:, None], axis=0)
     return jnp.sum(values * self.interior_w[:, None], axis=0, keepdims=True)
 
   def integrate_boundary(self, values: jax.Array) -> jax.Array:
-    # if values.ndim == 1:
-    #   return jnp.sum(values * self.boundary_w)
-    # else:
-    #   return jnp.sum(values * self.boundary_w[:, None], axis=0)
     return jnp.sum(values * self.boundary_w[:, None], axis=0, keepdims=True)
 
 
 def gauss_lobatto(ng: int):
   if ng < 2:
-    raise ValueError("Gauss-Lobatto requires ng >= 2")
+    raise ValueError("Gauss–Lobatto requires ng >= 2")
   x = np.zeros([ng,])
   w = np.zeros([ng,])
   x[0], x[-1] = -1.0, 1.0
@@ -59,21 +51,21 @@ def gauss_legendre_interval_quadrature(bounds: Tuple[float, float], ng: int) -> 
   interior_w = jnp.array(w_mapped)
 
   boundary_x = jnp.array([[a], [b]])
-  # boundary_w = jnp.array([w_mapped[0], w_mapped[-1]])
   boundary_w = jnp.array([1.0, 1.0])
   boundary_tangent = jnp.array([[1.0], [1.0]])
   boundary_normal = jnp.array([[-1.0], [1.0]])
 
   return Quadrature(
-    ng,
-    1,
-    interior_x,
-    interior_w,
-    boundary_x,
-    boundary_w,
-    boundary_tangent,
-    boundary_normal
+    dim=1,
+    shape=(ng,),
+    interior_x=interior_x,
+    interior_w=interior_w,
+    boundary_x=boundary_x,
+    boundary_w=boundary_w,
+    boundary_tangent=boundary_tangent,
+    boundary_normal=boundary_normal
   )
+
 
 
 def gauss_lobatto_rectangle_quadrature(
@@ -138,55 +130,46 @@ def gauss_lobatto_rectangle_quadrature(
   )
 
 
-def gauss_lobatto_legendre_circular_sector_quadrature(ng: int, theta: float) -> Quadrature:
-  nr, nt = ng, max(2, int(np.ceil(ng * theta)))
-  xr, wr = gauss_lobatto(nr)
-  r_nodes = 0.5 * (xr + 1.0)
-  wr_scaled = 0.5 * wr
-  xt, wt = roots_jacobi(nt, 0.0, 0.0)
-  t_nodes = 0.5 * theta * (xt + 1.0)
-  wt_scaled = 0.5 * theta * wt
+def gauss_legendre_disk_quadrature(nr: int, nt: int, R: float = 1.0) -> Quadrature:
+  # Radial quadrature on [0,R]
+  r_nodes, r_weights = roots_jacobi(nr, 0.0, 0.0)   # Gauss–Legendre
+  r = 0.5 * R * (r_nodes + 1.0)                     # map [-1,1] → [0,R]
+  wr = 0.5 * R * r_weights * r                      # includes dr and Jacobian r
 
-  R, T = jnp.meshgrid(jnp.array(r_nodes), jnp.array(t_nodes), indexing='ij')
-  X = (R * jnp.cos(T)).ravel()
-  Y = (R * jnp.sin(T)).ravel()
-  interior_x = jnp.stack([X, Y], axis=1)
-  interior_w = (jnp.outer(wr_scaled, wt_scaled) * R).ravel()
+  # Angular quadrature on [0,2π]
+  t_nodes, t_weights = roots_jacobi(nt, 0.0, 0.0)
+  theta = np.pi * (t_nodes + 1.0)                   # map [-1,1] → [0,2π]
+  wt = np.pi * t_weights
 
-  boundary_points, boundary_weights, tangents, normals = [], [], [], []
+  # Tensor product grid
+  Rgrid, Tgrid = np.meshgrid(r, theta, indexing="ij")
+  WR, WT = np.meshgrid(wr, wt, indexing="ij")
 
-  r = jnp.array(r_nodes)
-  # θ=0 edge
-  boundary_points.append(jnp.stack([r, jnp.zeros_like(r)], axis=1))
-  boundary_weights.append(wr_scaled)
-  tangents.append(jnp.stack([jnp.ones_like(r), jnp.zeros_like(r)], axis=1))
-  normals.append(jnp.stack([jnp.zeros_like(r), -jnp.ones_like(r)], axis=1))
-  # θ=theta edge
-  boundary_points.append(jnp.stack([r * jnp.cos(theta), r * jnp.sin(theta)], axis=1))
-  boundary_weights.append(wr_scaled)
-  tangents.append(jnp.stack([jnp.full_like(r, jnp.cos(theta)),
-                             jnp.full_like(r, jnp.sin(theta))], axis=1))
-  normals.append(jnp.stack([-jnp.full_like(r, jnp.sin(theta)),
-                            jnp.full_like(r, jnp.cos(theta))], axis=1))
-  # arc r=1
-  t = jnp.array(t_nodes)
-  boundary_points.append(jnp.stack([jnp.cos(t), jnp.sin(t)], axis=1))
-  boundary_weights.append(wt_scaled)
-  tangents.append(jnp.stack([-jnp.sin(t), jnp.cos(t)], axis=1))
-  normals.append(jnp.stack([jnp.cos(t), jnp.sin(t)], axis=1))
+  x = Rgrid * np.cos(Tgrid)
+  y = Rgrid * np.sin(Tgrid)
+  w = WR * WT
 
-  boundary_x = jnp.concatenate(boundary_points, axis=0)
-  boundary_w = jnp.concatenate(boundary_weights, axis=0)
-  boundary_tangent = jnp.concatenate(tangents, axis=0)
-  boundary_normal = jnp.concatenate(normals, axis=0)
+  interior_x = jnp.array(np.stack([x.ravel(), y.ravel()], axis=1))
+  interior_w = jnp.array(w.ravel())
+
+  # Boundary (circle r=R)
+  xb = R * np.cos(theta)
+  yb = R * np.sin(theta)
+  wb = R * wt  # arc length = R dθ
+
+  boundary_x = jnp.array(np.stack([xb, yb], axis=1))
+  boundary_w = jnp.array(wb)
+
+  tangent = jnp.array(np.stack([-np.sin(theta), np.cos(theta)], axis=1))
+  normal  = jnp.array(np.stack([ np.cos(theta), np.sin(theta)], axis=1))
 
   return Quadrature(
-    ng,
-    2,
-    interior_x,
-    interior_w,
-    boundary_x,
-    boundary_w,
-    boundary_tangent,
-    boundary_normal
+    dim=2,
+    shape=(nr, nt),
+    interior_x=interior_x,
+    interior_w=interior_w,
+    boundary_x=boundary_x,
+    boundary_w=boundary_w,
+    boundary_tangent=tangent,
+    boundary_normal=normal
   )
