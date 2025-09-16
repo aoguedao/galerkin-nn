@@ -21,23 +21,23 @@ def spd_solve(
   Solve K c = F with K nominally SPD but possibly ill-conditioned.
   Returns c with same dtype as K/F. Shapes: K (m,m), F (m,1).
   """
+
   # 1) Symmetrize (remove tiny asymmetry from numerics)
   K = 0.5 * (K + K.T)
 
   # 2) Diagonal scaling (Jacobi preconditioning)
-  d = jnp.sqrt(jnp.clip(jnp.diag(K), 1e-30))             # (m,)
+  d = jnp.sqrt(jnp.clip(jnp.diag(K), 1e-30))          # (m,)
   Dinv = 1.0 / d
-  Khat = (K * Dinv[None, :]) * Dinv[:, None]             # D^{-1} K D^{-1}
+  Khat = (K * Dinv[None, :]) * Dinv[:, None]          # D^{-1} K D^{-1}
   Fhat = F * Dinv[:, None]
 
   # 3) Ridge scaled to matrix size
   lam = ridge * (jnp.trace(Khat) / Khat.shape[0])
   Khat = Khat + lam * jnp.eye(Khat.shape[0], dtype=Khat.dtype)
 
-  # 4) Cholesky solve
+  # 4) Cholesky solver
   L = jnp.linalg.cholesky(Khat)
-  y = jax.scipy.linalg.solve_triangular(L, Fhat, lower=True)
-  c_hat = jax.scipy.linalg.solve_triangular(L.T, y, lower=False)
+  c_hat = jax.scipy.linalg.cho_solve((L, True), Fhat)
 
   # 5) Undo scaling: c = D^{-1} c_hat
   return c_hat * Dinv[:, None]
@@ -66,8 +66,8 @@ class GalerkinNN:
       residual = pde.residual()
       F = residual(u=u, v=v, quad=quad).T
       K = bilinear_form(u=v, v=v, quad=quad)
-      coeff, _, _, _ = jnp.linalg.lstsq(K, F)
-      # coeff = spd_solve(K, F)
+      # coeff, _, _, _ = jnp.linalg.lstsq(K, F)
+      coeff = spd_solve(K, F)
       return coeff
 
     error_eta = pde.error_eta()
@@ -142,8 +142,8 @@ class GalerkinNN:
     basis_net = FunctionState(
       interior=sigma_net.interior @ basis_coeff,
       boundary=sigma_net.boundary @ basis_coeff,
-      grad_interior=jnp.einsum('nid,ij->njd', sigma_net.grad_interior, basis_coeff),
-      grad_boundary=jnp.einsum('nid,ij->njd', sigma_net.grad_boundary, basis_coeff)
+      grad_interior=jnp.einsum("nid,ij->njd", sigma_net.grad_interior, basis_coeff),
+      grad_boundary=jnp.einsum("nid,ij->njd", sigma_net.grad_boundary, basis_coeff)
     )
     eta = error_eta(u=u, v=basis_net, quad=quad).squeeze()
     fixed_basis_net_fn = partial(sigma_net_fn, params=params)
@@ -183,7 +183,7 @@ class GalerkinNN:
 
     u = u0
     bstep = 1
-    error = 1e10
+    error = jnp.inf
     while (error > tol_solution) and (bstep <= max_bases):
       print(f"Basis Step: {bstep}")
       activation = activations_fn(bstep)

@@ -2,14 +2,14 @@ import jax
 import jax.numpy as jnp
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from flax import struct
+# from dataclasses import dataclass
 from typing import Callable
 
 from .quadratures import Quadrature
 
 
-@jax.tree_util.register_dataclass
-@dataclass(frozen=True)
+@struct.dataclass
 class FunctionState:
   interior: jax.Array       # (N, n_states)
   boundary: jax.Array       # (Nb, n_states)
@@ -55,8 +55,7 @@ class FunctionState:
     return self.interior.shape[1]
 
 
-@jax.tree_util.register_dataclass
-@dataclass(frozen=True)
+@struct.dataclass
 class PDE(ABC):
 
   @abstractmethod

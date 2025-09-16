@@ -1,7 +1,4 @@
 # %%
-%load_ext autoreload
-%autoreload 2
-
 import jax
 import jax.numpy as jnp
 import optax
@@ -26,7 +23,6 @@ A = 5e-3  # Init Learning Rate
 rho = 1.1  # Learning Rate Growth
 
 # PDE
-@jax.tree_util.register_dataclass
 class PoissonStringDisplacementRobinBC(PDE):
   """1D Poisson (string displacement) with Robin BC:
     -u'' = f  in (0,1)
@@ -142,4 +138,4 @@ fig, ax = plt.subplots()
 ax.plot(quad.interior_x, u_actual, label="actual")
 ax.plot(quad.interior_x, u_pred, label="estimated")
 ax.legend()
-fig.savefig("poisson1d.png")
+fig.savefig("images/poisson1d.png")
