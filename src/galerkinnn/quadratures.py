@@ -173,3 +173,117 @@ def gauss_legendre_disk_quadrature(nr: int, nt: int, R: float = 1.0) -> Quadratu
     boundary_tangent=tangent,
     boundary_normal=normal
   )
+
+
+# =====================
+# Domain Decomposition
+# =====================
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class DDQuadrature(Quadrature):
+  """
+  Quadrature with DD metadata for 1D (extends your Quadrature).
+  - subdomain_id: integer id of this subdomain
+  - neighbor_ids: (Jn,) tuple of neighbor subdomain ids (order defines columns)
+  - owner_j_at_bndry: (Nb,) int32; neighbor id that owns that boundary point; -1 if global boundary
+  - boundary_owner_onehot: (Nb, Jn) float32; one-hot over neighbor_ids; zeros row on global boundary
+  - boundary_mask_global: (Nb,) bool; True where boundary point is a global boundary
+  """
+  subdomain_id: int
+  neighbor_ids: Tuple[int, ...]
+  owner_j_at_bndry: jax.Array          # (Nb,), int32; -1 on global boundary
+  boundary_owner_onehot: jax.Array     # (Nb, Jn), float32 one-hot; zeros on global boundary
+  boundary_mask_global: jax.Array      # (Nb,), bool
+
+
+def _owner_onehot_from_ids(
+  owner_j_at_bndry: jax.Array,
+  neighbor_ids: Tuple[int, ...]
+) -> jax.Array:
+  """
+  owner_j_at_bndry: (Nb,) int32 with neighbor ids, -1 for global boundary
+  neighbor_ids: tuple length Jn
+  returns (Nb, Jn) one-hot over neighbor_ids (zeros row when owner == -1)
+  """
+  nb = owner_j_at_bndry.shape[0]
+  nid = jnp.array(neighbor_ids, dtype=jnp.int32)  # (Jn,)
+  # Broadcast equality; rows with -1 yield all False -> zeros row
+  oh = (owner_j_at_bndry.reshape(nb, 1) == nid.reshape(1, -1)).astype(jnp.float32)
+  return oh
+
+
+def dd_overlapping_interval_quadratures(
+  bounds: Tuple[float, float] = (0.0, 1.0),
+  mid: float = 0.5,
+  overlap: float = 0.2,
+  ng: int = 64,
+):
+  """
+  Build two overlapping subdomain quadratures on [a,b]:
+    sub 0: [a, mid + overlap/2]
+    sub 1: [mid - overlap/2, b]
+  Each DDQuadrature has neighbor_ids, owner_j_at_bndry, boundary_owner_onehot, boundary_mask_global.
+  """
+  a, b = bounds
+  assert b > a
+  assert 0.0 < overlap < (b - a)
+  left_b  = float(jnp.clip(mid + 0.5 * overlap, a, b))
+  right_a = float(jnp.clip(mid - 0.5 * overlap, a, b))
+  assert right_a < left_b, "Invalid overlap: subdomains do not overlap."
+
+  # Base quadratures for each sub-interval (assumes your builder yields 2 boundary points [left,right])
+  q0 = gauss_legendre_interval_quadrature((a, left_b), ng)   # boundary_x ~ [[a],[left_b]]
+  q1 = gauss_legendre_interval_quadrature((right_a, b), ng)  # boundary_x ~ [[right_a],[b]]
+
+  # --- Subdomain 0 metadata ---
+  sub0_id      = 0
+  sub0_neigh   = (1,)  # columns order for one-hot
+  # Ownership: left boundary is global, right boundary owned by subdomain 1
+  sub0_owner   = jnp.array([-1, 1], dtype=jnp.int32)         # (Nb=2,)
+  sub0_onehot  = _owner_onehot_from_ids(sub0_owner, sub0_neigh)  # (2,1)
+  sub0_mask_g  = (sub0_owner == -1)                           # (2,)
+
+  Q0 = DDQuadrature(
+    # inherited Quadrature fields
+    dim=q0.dim,
+    shape=q0.shape,
+    interior_x=q0.interior_x,
+    interior_w=q0.interior_w,
+    boundary_x=q0.boundary_x,
+    boundary_w=q0.boundary_w,
+    boundary_tangent=q0.boundary_tangent,
+    boundary_normal=q0.boundary_normal,
+    # DD fields
+    subdomain_id=sub0_id,
+    neighbor_ids=sub0_neigh,
+    owner_j_at_bndry=sub0_owner,
+    boundary_owner_onehot=sub0_onehot,
+    boundary_mask_global=sub0_mask_g,
+  )
+
+  # --- Subdomain 1 metadata ---
+  sub1_id      = 1
+  sub1_neigh   = (0,)
+  # Ownership: left boundary owned by subdomain 0, right boundary is global
+  sub1_owner   = jnp.array([0, -1], dtype=jnp.int32)
+  sub1_onehot  = _owner_onehot_from_ids(sub1_owner, sub1_neigh)
+  sub1_mask_g  = (sub1_owner == -1)
+
+  Q1 = DDQuadrature(
+    dim=q1.dim,
+    shape=q1.shape,
+    interior_x=q1.interior_x,
+    interior_w=q1.interior_w,
+    boundary_x=q1.boundary_x,
+    boundary_w=q1.boundary_w,
+    boundary_tangent=q1.boundary_tangent,
+    boundary_normal=q1.boundary_normal,
+    subdomain_id=sub1_id,
+    neighbor_ids=sub1_neigh,
+    owner_j_at_bndry=sub1_owner,
+    boundary_owner_onehot=sub1_onehot,
+    boundary_mask_global=sub1_mask_g,
+  )
+
+  return Q0, Q1

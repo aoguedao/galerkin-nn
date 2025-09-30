@@ -28,6 +28,9 @@ def spd_solve(
   # 2) Diagonal scaling (Jacobi preconditioning)
   d = jnp.sqrt(jnp.clip(jnp.diag(K), 1e-30))          # (m,)
   Dinv = 1.0 / d
+
+  F = jnp.reshape(F, (F.shape[0], -1))[:, :1]
+
   Khat = (K * Dinv[None, :]) * Dinv[:, None]          # D^{-1} K D^{-1}
   Fhat = F * Dinv[:, None]
 
@@ -64,7 +67,8 @@ class GalerkinNN:
     def galerkin_lsq(u: FunctionState, v: FunctionState, quad: Quadrature, pde: PDE) -> jax.Array:
       bilinear_form = pde.bilinear_form()
       residual = pde.residual()
-      F = residual(u=u, v=v, quad=quad).T
+      F = residual(u=u, v=v, quad=quad)
+      F = jnp.atleast_2d(F).T
       K = bilinear_form(u=v, v=v, quad=quad)
       # coeff, _, _, _ = jnp.linalg.lstsq(K, F)
       coeff = spd_solve(K, F)
@@ -106,7 +110,13 @@ class GalerkinNN:
           grad_interior=jnp.einsum("nid,ij->njd", sigma_net.grad_interior, basis_coeff),
           grad_boundary=jnp.einsum("nid,ij->njd", sigma_net.grad_boundary, basis_coeff)
         )
-        loss = error_eta(u=u, v=basis_net, quad=quad).squeeze()
+        loss = error_eta(u=u, v=basis_net, quad=quad)  # shape (1, 1)
+        loss = loss.squeeze()
+
+        # jax.debug.print("E shape: {}", loss.shape)
+        # loss = jnp.linalg.norm(loss)
+        # jax.debug.print("loss shape: {}", loss.shape)  # should be ()
+        
         return -jnp.abs(loss)
 
       loss, loss_grads = jax.value_and_grad(loss_fn, argnums=0)(params)
@@ -165,10 +175,16 @@ class GalerkinNN:
     def galerkin_solve(bases: FunctionState, quad: Quadrature, pde: PDE) -> jax.Array:
       linear_op = pde.linear_operator()
       bilinear_form = pde.bilinear_form()
-      F = linear_op(v=bases, quad=quad).T
+      F = linear_op(v=bases, quad=quad)
+      F = jnp.atleast_2d(F).T
       K = bilinear_form(u=bases, v=bases, quad=quad)
       # coeff, _, _, _ = jnp.linalg.lstsq(K, F)
       coeff = spd_solve(K, F)
+      # jax.debug.print("K shape {}", K.shape)
+      # jax.debug.print("F shape before solve {}", F.shape)
+      # jax.debug.print("u_coeff shape after solve {}", coeff.shape)
+      # jax.debug.print("u.interior shape {}", (bases.interior @ (coeff if coeff.ndim==2 else coeff[:,None])).shape)
+      assert F.ndim == 2 and K.ndim == 2, f"Bad shapes: F {F.shape}, K {K.shape}"
       return coeff
 
     eta_errors = []
@@ -232,6 +248,18 @@ class GalerkinNN:
         grad_boundary=jnp.einsum("xbd,bj->xjd", bases.grad_boundary, u_coeff)
       )
 
+      # def lincomb_function_state(bases: FunctionState, coeff: jax.Array) -> FunctionState:
+      #   c = coeff.reshape(-1)                               # (m,)
+      #   # interior: (N, m) @ (m,) -> (N,)
+      #   ui = jnp.einsum('nm,m->n', bases.interior, c)[:, None]         # (N,1)
+      #   # boundary: (Nb, m) @ (m,) -> (Nb,)
+      #   ub = jnp.einsum('am,m->a', bases.boundary, c)[:, None]         # (Nb,1)
+      #   # grad: (N, m, d) • (m,) -> (N, d) -> expand to (N,1,d)
+      #   gi = jnp.einsum('nmd,m->nd', bases.grad_interior, c)[:, None, :]  # (N,1,d)
+      #   gb = jnp.einsum('nmd,m->nd', bases.grad_boundary, c)[:, None, :]
+      #   return FunctionState(interior=ui, boundary=ub, grad_interior=gi, grad_boundary=gb)
+
+      # u = lincomb_function_state(bases, u_coeff)  # single-state u
       print(f"\tEta error: {error}")
       bstep += 1
 

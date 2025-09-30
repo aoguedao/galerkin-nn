@@ -1,17 +1,19 @@
 # %%
 import jax
 import jax.numpy as jnp
+import matplotlib.pyplot as plt
 import optax
 
 from typing import Callable
 
+from galerkinnn.utils import make_u_fn, compare_num_exact_2d
 from galerkinnn import FunctionState, PDE, Quadrature, GalerkinNN
 from galerkinnn.quadratures import gauss_legendre_disk_quadrature
 
 # Hyper-parameters
 seed = 42
 max_bases = 6
-max_epoch_basis = 100
+max_epoch_basis = 200
 tol_solution = 1e-7
 tol_basis = 1e-7
 
@@ -150,48 +152,12 @@ end = time.perf_counter()
 elapsed = end - start
 print(f"Elapsed time: {elapsed:.6f} seconds")
 
-# %%
-import matplotlib.pyplot as plt
 
-def u_sol(X: jax.Array, eps: float):
+# Plotting
+u_num_fn = make_u_fn(sigma_net_fn_list, u_coeff, basis_coeff_list)
+
+def u_exact_fn(X: jax.Array):
   r2 = jnp.sum(X**2, axis=1, keepdims=True)
   return -0.5 * r2 + eps + 0.5
 
-u_actual = u_sol(quad.interior_x, eps)
-u_pred = u.interior
-
-x, y = quad.interior_x[:,0], quad.interior_x[:,1]
-fig, ax = plt.subplots(1,3, figsize=(15,5))
-
-sc0 = ax[0].scatter(x, y, c=u_actual[:,0], cmap="viridis")
-ax[0].set_title("Exact solution")
-plt.colorbar(sc0, ax=ax[0])
-
-sc1 = ax[1].scatter(x, y, c=u_pred[:,0], cmap="viridis")
-ax[1].set_title("NN solution")
-plt.colorbar(sc1, ax=ax[1])
-
-sc2 = ax[2].scatter(x, y, c=(u_pred - u_actual)[:,0], cmap="RdBu")
-ax[2].set_title("Error (pred - exact)")
-plt.colorbar(sc2, ax=ax[2])
-
-for a in ax: a.set_aspect("equal")
-fig.savefig("poisson2d_scatter.png")
-
-# %%
-import numpy as np
-from matplotlib.tri import Triangulation
-
-x, y = quad.interior_x[:,0], quad.interior_x[:,1]
-tri = Triangulation(x, y)
-
-fig, ax = plt.subplots()
-tpc = ax.tripcolor(tri, u_pred[:,0] - u_actual[:,0], shading="gouraud", cmap="RdBu")
-ax.set_aspect("equal")
-plt.colorbar(tpc, ax=ax)
-ax.set_title("Error field")
-fig.savefig("poisson2d_error.png")
-
-# %%
-l2_error = jnp.sqrt(jnp.mean((u_pred - u_actual)**2))
-print("L2 error:", float(l2_error))
+fig, ax = compare_num_exact_2d(quad.interior_x, u_num_fn, u_exact_fn, kind="tri", savepath="cmp2d_tri.png")

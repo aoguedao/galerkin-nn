@@ -3,6 +3,7 @@ import jax
 import jax.numpy as jnp
 import optax
 
+from flax import struct
 from typing import Callable
 
 from galerkinnn import FunctionState, PDE, Quadrature, GalerkinNN
@@ -10,8 +11,8 @@ from galerkinnn.quadratures import gauss_legendre_interval_quadrature
 
 # Hyper-parameters
 seed = 42
-max_bases = 4
-max_epoch_basis = 50
+max_bases = 6
+max_epoch_basis = 100
 tol_solution = 1e-7
 tol_basis = 1e-7
 
@@ -22,15 +23,16 @@ r = 2  # Neurons Growth
 A = 5e-3  # Init Learning Rate
 rho = 1.1  # Learning Rate Growth
 
+
 # PDE
+@struct.dataclass
 class PoissonStringDisplacementRobinBC(PDE):
   """1D Poisson (string displacement) with Robin BC:
     -u'' = f  in (0,1)
     u + eps * n·∂u = 0 on boundary
     bilinear form: a(u,v) = (u', v')_Ω + eps^{-1} (u(0)v(0) + u(1)v(1))
   """
-  def __init__(self, eps: float = 1e-4):
-    self.eps = eps
+  eps: float = 1e-4
 
   def source(self):
     def f(X: jax.Array) -> jax.Array:
@@ -101,7 +103,7 @@ pde = PoissonStringDisplacementRobinBC(eps=eps)
 u0_fn = lambda X: jnp.zeros_like(X)
 u0_grad = lambda X: jnp.zeros_like(X)
 u0 = FunctionState.from_function(func=u0_fn, quad=quad, grad_func=u0_grad)
-
+# %%
 import time
 start = time.perf_counter()
 
@@ -135,7 +137,7 @@ def u_sol(X: jax.Array):
 u_actual = u_sol(quad.interior_x)
 u_pred = u.interior
 fig, ax = plt.subplots()
-ax.plot(quad.interior_x, u_actual, label="actual")
-ax.plot(quad.interior_x, u_pred, label="estimated")
+ax.plot(quad.interior_x, u_actual, lw=1.5, label="actual")
+ax.plot(quad.interior_x, u_pred, "--", label="estimated")
 ax.legend()
-fig.savefig("images/poisson1d.png")
+# fig.savefig("images/poisson1d.png")

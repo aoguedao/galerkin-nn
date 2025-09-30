@@ -24,11 +24,25 @@ The solver takes as inputs:
 - Basis Tolerance.
 
 
-## Example
+### Domain Decomposition
 
-[Poisson 1D: String Displacement](https://colab.research.google.com/drive/1RZQPWLb59serII9sBhm_wc35ykY8CloF?usp=sharing)
+- `DDQuadrature`, a child class of `Quadrature`, handles boundary ownership of boundary nodes to neighbor quadratures.
+- `DDPDE`, a child class of `PDE`, takes the base PDE formulation to form the domain decomposition formulation. A Robin boundary condition is imposed into the interfaces between neighbors and it takes the solution of its neighbors to inject them as traces for the formulation. 
 
-Also available on `.\examples\`.
+
+## Examples
+
+| Example | Notebook |
+| :----------------- | :--------------- |
+|Poisson 1D String | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aoguedao/galerkin-nn/blob/main/examples/poisson1D_string.py) |
+|Poisson 2D Disk | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aoguedao/galerkin-nn/blob/main/examples/poisson2D_disk.py) |
+| Steady Heat 1D Discontinuous conductivity | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aoguedao/galerkin-nn/blob/main/examples/steady_heat1D_string.py) |
+| Steady Heat 2d Piecewise conductivity | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aoguedao/galerkin-nn/blob/main/examples/steady_heat2D_disk_piecewiseK.py) |
+| Domain Decomposition Poisson 1D String | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aoguedao/galerkin-nn/blob/main/examples/poisson1D_string_dd.py) |
+| Domain Decomposition Poisson 1D Jump | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aoguedao/galerkin-nn/blob/main/examples/poisson1D_jump_dd.py) |
+
+
+All examples are available on the folder `.\examples\`.
 
 
 ## Installation

@@ -13,8 +13,8 @@ from galerkinnn.quadratures import gauss_legendre_disk_quadrature
 # Hyper-parameters
 # -------------------------
 seed = 43
-max_bases = 14
-max_epoch_basis = 200
+max_bases = 5
+max_epoch_basis = 50
 tol_solution = 1e-7
 tol_basis = 1e-7
 
@@ -37,11 +37,17 @@ class SteadyHeat2DRobin(PDE):
     g_bdry_fn = self.g_bdry_fn
     def L(v, quad) -> jnp.ndarray:
       fvals = f_fn(quad.interior_x).reshape(-1)
-      Lin = jnp.sum((fvals[:, None] * v.interior) * quad.interior_w[:, None],
-                    axis=0, keepdims=True)
+      Lin = jnp.sum(
+        (fvals[:, None] * v.interior) * quad.interior_w[:, None],
+        axis=0,
+        keepdims=True
+      )
       gvals = g_bdry_fn(quad.boundary_x).reshape(-1)
-      Lbd = jnp.sum((gvals[:, None] * v.boundary) * quad.boundary_w[:, None],
-                    axis=0, keepdims=True)
+      Lbd = jnp.sum(
+        (gvals[:, None] * v.boundary) * quad.boundary_w[:, None],
+        axis=0,
+        keepdims=True
+      )
       return Lin + Lbd
     return L
 
@@ -50,11 +56,19 @@ class SteadyHeat2DRobin(PDE):
     h_bdry_fn = self.h_bdry_fn
     def a(u, v, quad) -> jnp.ndarray:
       kvals = k_fn(quad.interior_x).reshape(-1)
-      a1 = jnp.einsum("nui,nvi,n->uv",
-                      u.grad_interior, v.grad_interior, kvals * quad.interior_w)
+      a1 = jnp.einsum(
+        "nui,nvi,n->uv",
+        u.grad_interior,
+        v.grad_interior,
+        kvals * quad.interior_w
+      )
       hvals = h_bdry_fn(quad.boundary_x).reshape(-1)
-      a2 = jnp.einsum("an,am,a->nm",
-                      u.boundary, v.boundary, hvals * quad.boundary_w)
+      a2 = jnp.einsum(
+        "an,am,a->nm",
+        u.boundary,
+        v.boundary,
+        hvals * quad.boundary_w
+      )
       return a1 + a2
     return a
 
