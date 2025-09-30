@@ -32,14 +32,7 @@ The solver takes as inputs:
 
 ## Examples
 
-| Example | Notebook |
-| :----------------- | :--------------- |
-|Poisson 1D String | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aoguedao/galerkin-nn/blob/main/examples/poisson1D_string.py) |
-|Poisson 2D Disk | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aoguedao/galerkin-nn/blob/main/examples/poisson2D_disk.py) |
-| Steady Heat 1D Discontinuous conductivity | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aoguedao/galerkin-nn/blob/main/examples/steady_heat1D_string.py) |
-| Steady Heat 2d Piecewise conductivity | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aoguedao/galerkin-nn/blob/main/examples/steady_heat2D_disk_piecewiseK.py) |
-| Domain Decomposition Poisson 1D String | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aoguedao/galerkin-nn/blob/main/examples/poisson1D_string_dd.py) |
-| Domain Decomposition Poisson 1D Jump | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aoguedao/galerkin-nn/blob/main/examples/poisson1D_jump_dd.py) |
+[Poisson 1D: String Displacement](https://colab.research.google.com/drive/1RZQPWLb59serII9sBhm_wc35ykY8CloF?usp=sharing)
 
 
 All examples are available on the folder `.\examples\`.
