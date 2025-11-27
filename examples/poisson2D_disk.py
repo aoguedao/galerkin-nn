@@ -8,20 +8,20 @@ from typing import Callable
 
 from galerkinnn.utils import make_u_fn, compare_num_exact_2d
 from galerkinnn import FunctionState, PDE, Quadrature, GalerkinNN
-from galerkinnn.quadratures import gauss_legendre_disk_quadrature
+from galerkinnn.quadratures import disk_quadrature
 
 # Hyper-parameters
 seed = 42
-max_bases = 6
-max_epoch_basis = 200
-tol_solution = 1e-7
+max_bases = 8
+max_epoch_basis = 100
+tol_solution = 2e-6
 tol_basis = 1e-7
 
 # n_train = 128
 n_val = 1024
-N = 5  # Init Neurons
-r = 2  # Neurons Growth
-A = 5e-3  # Init Learning Rate
+N = 200  # Init Neurons
+r = 100  # Neurons Growth
+A = 2e-2  # Init Learning Rate
 rho = 1.1  # Learning Rate Growth
 
 
@@ -111,26 +111,28 @@ def net_fn(
   return X
 
 def activations_fn(i):
-  scale_fn = lambda i: i
-  scale_i = scale_fn(i)
+  # scale_i = i
   def activation(x):
-    return jnp.tanh(scale_i * x)
+    # return jnp.tanh(scale_i * x)
+    return jnp.tanh(x)
   return activation
 
-network_widths_fn = lambda i: N * r ** (i - 1)
+# network_widths_fn = lambda i: N * r ** (i - 1)
+network_widths_fn = lambda i: N + r * int((i - 1) / 2)
 learning_rates_fn = lambda i: A * rho ** (-(i - 1))
 
 
 # Galerkin Neural Network Solver
 R = 1.0
 nr, nt = 128, 128  # radius, angle
-quad = gauss_legendre_disk_quadrature(nr=nr, nt=nt, R=R)
+quad = disk_quadrature(radius=R, n_r=nr, n_theta=nt)
 eps = 1e-4
 pde = PoissonMembraneDisplacementRobinBC(eps=eps)
 u0_fn = lambda X: jnp.zeros(shape=(X.shape[0], 1))
 u0_grad = lambda X: jnp.zeros_like(X)
 u0 = FunctionState.from_function(func=u0_fn, quad=quad, grad_func=u0_grad)
 
+#%%
 import time
 start = time.perf_counter()
 
@@ -152,7 +154,7 @@ end = time.perf_counter()
 elapsed = end - start
 print(f"Elapsed time: {elapsed:.6f} seconds")
 
-
+# %%
 # Plotting
 u_num_fn = make_u_fn(sigma_net_fn_list, u_coeff, basis_coeff_list)
 
@@ -160,4 +162,6 @@ def u_exact_fn(X: jax.Array):
   r2 = jnp.sum(X**2, axis=1, keepdims=True)
   return -0.5 * r2 + eps + 0.5
 
-fig, ax = compare_num_exact_2d(quad.interior_x, u_num_fn, u_exact_fn, kind="tri", savepath="cmp2d_tri.png")
+# fig, ax = compare_num_exact_2d(quad.interior_x, u_num_fn, u_exact_fn, kind="tri", savepath="cmp2d_tri.png")
+plt.close()
+plt.semilogy(eta_errors)

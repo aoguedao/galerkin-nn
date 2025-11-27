@@ -3,12 +3,14 @@ import jax.numpy as jnp
 
 from abc import ABC, abstractmethod
 from flax import struct
-# from dataclasses import dataclass
 from typing import Callable, Tuple
 
 from .quadratures import Quadrature
+from .utils import _dummy_quadrature, _dummy_state
 
-TraceFn = Callable[[jax.Array], jax.Array]   # X -> (N,1) or (N,)
+TraceFn = Callable[[jax.Array], jax.Array]
+
+_PDE_SHAPE_TEST_DIMS = (1, 2)
 
 
 @struct.dataclass
@@ -17,6 +19,35 @@ class FunctionState:
   boundary: jax.Array       # (Nb, n_states)
   grad_interior: jax.Array  # (N, n_states, dim)
   grad_boundary: jax.Array  # (Nb, n_states, dim)
+
+  def __post_init__(self):
+    """
+    Lightweight shape check: do not modify fields, only validate consistency.
+    """
+    interior = self.interior
+    boundary = self.boundary
+    grad_interior = self.grad_interior
+    grad_boundary = self.grad_boundary
+
+    if interior.ndim != 2:
+      raise ValueError(f"interior must be 2D (N, n_states), got shape {interior.shape}")
+    if boundary.ndim != 2:
+      raise ValueError(f"boundary must be 2D (Nb, n_states), got shape {boundary.shape}")
+    if grad_interior.ndim != 3:
+      raise ValueError(f"grad_interior must be 3D (N, n_states, dim), got shape {grad_interior.shape}")
+    if grad_boundary.ndim != 3:
+      raise ValueError(f"grad_boundary must be 3D (Nb, n_states, dim), got shape {grad_boundary.shape}")
+
+    Ni, n_states = interior.shape
+    Nb = boundary.shape[0]
+    dim = grad_interior.shape[2]
+
+    if boundary.shape[1] != n_states:
+      raise ValueError(f"boundary n_states={boundary.shape[1]} != interior n_states={n_states}")
+    if grad_interior.shape != (Ni, n_states, dim):
+      raise ValueError(f"grad_interior shape {grad_interior.shape} incompatible with interior ({Ni}, {n_states}) and dim {dim}")
+    if grad_boundary.shape != (Nb, n_states, dim):
+      raise ValueError(f"grad_boundary shape {grad_boundary.shape} incompatible with boundary ({Nb}, {n_states}) and dim {dim}")
 
   @staticmethod
   def _ensure_2d_values(vals: jax.Array) -> jax.Array:
@@ -57,8 +88,47 @@ class FunctionState:
     return self.interior.shape[1]
 
 
+
+
+
 @struct.dataclass
 class PDE(ABC):
+
+  def _shape_self_test(self):
+    """
+    Run a small shape sanity check on instantiation (opt-in via env var).
+    Tries a couple of (n_u, n_v) combinations and candidate dimensions.
+    """
+    def _assert_shape(name: str, arr: jax.Array, expected: Tuple[Tuple[int, ...], ...]):
+      shape = tuple(arr.shape)
+      if shape not in expected:
+        raise ValueError(f"{name} returned shape {shape}, expected one of {expected}")
+  
+    combos = ((1, 1), (1, 2), (2, 1))
+    last_error = None
+    for dim in _PDE_SHAPE_TEST_DIMS:
+      quad = _dummy_quadrature(dim)
+      try:
+        for n_u, n_v in combos:
+          u = _dummy_state(quad, n_states=n_u)
+          v = _dummy_state(quad, n_states=n_v)
+          L = self.linear_operator()(v=v, quad=quad)
+          A = self.bilinear_form()(u=u, v=v, quad=quad)
+          n = self.energy_norm()(v=v, quad=quad)
+          R = self.residual()(u=u, v=v, quad=quad)
+          E = self.error_eta()(u=u, v=v, quad=quad)
+
+          _assert_shape("linear_operator", L, ((n_v,), (1, n_v)))
+          _assert_shape("bilinear_form", A, ((n_u, n_v),))
+          _assert_shape("energy_norm", n, ((n_v,), (n_v, 1)))
+          _assert_shape("residual", R, ((n_u, n_v),))
+          _assert_shape("error_eta", E, ((n_u, n_v),))
+        return
+      except Exception as exc:
+        last_error = exc
+        continue
+
+    raise RuntimeError(f"PDE shape self-test failed: {last_error}") from last_error
 
   @abstractmethod
   def source(self) -> Callable[[jax.Array], jax.Array]: ...
@@ -108,18 +178,16 @@ class DDPDE(PDE):
   ASM penalty transmission wrapper (symmetric, PSD).
   - base: underlying PDE (keeps physical Robin on Γ_phys)
   - eps_interface: interface penalty (Dirichlet ≈ 1/eps_interface → ∞)
-  - trace_fns: STATIC tuple of neighbor trace callables ordered as quad.neighbor_ids;
-               each returns (N,1) or (N,) when evaluated at quad.boundary_x
+  - trace_fns: STATIC tuple of neighbor trace callables ordered as quad.neighbor_ids; each returns (N,1) or (N,) when evaluated at quad.boundary_x
   """
   base: PDE
   eps_interface: float = 1e-3
   trace_fns: Tuple[TraceFn, ...] = struct.field(pytree_node=False, default_factory=tuple)
 
-  # (optional) convenience to update traces without changing dataclass layout
+  # convenience to update traces without changing dataclass layout
   def with_traces(self, trace_fns: Tuple[TraceFn, ...]) -> "DDPDE":
     return self.replace(trace_fns=trace_fns)
 
-  # passthrough
   def source(self):
     return self.base.source()
 
@@ -132,45 +200,56 @@ class DDPDE(PDE):
     return ~mask_g
 
   def _g_on_boundary(self, quad: Quadrature) -> jax.Array:
-    """Assemble neighbor trace g at THIS subdomain boundary via one-hot ownership."""
+    """
+    Select neighbor-trace data on this boundary using the ownership one-hot.
+    No masking here; masking happens in the forms.
+    """
     Nb = quad.boundary_x.shape[0]
     onehot = getattr(quad, "boundary_owner_onehot", None)
-    neighbor_ids = getattr(quad, "neighbor_ids", ())
-    if onehot is None or len(neighbor_ids) == 0 or len(self.trace_fns) == 0:
+    if onehot is None or onehot.shape[0] != Nb or not self.trace_fns:
       return jnp.zeros((Nb,), dtype=quad.boundary_w.dtype)
 
-    Jn = onehot.shape[1]
-    assert len(self.trace_fns) == Jn, "trace_fns length must match neighbor_ids length"
+    cols = [fn(quad.boundary_x).reshape(-1) for fn in self.trace_fns]
+    G = jnp.stack(cols, axis=1)
+    return jnp.sum(G * onehot, axis=1)
 
-    cols = [fn(quad.boundary_x).reshape(-1) for fn in self.trace_fns]   # (Nb,)
-    G = jnp.stack(cols, axis=1)                                         # (Nb, Jn)
-    g_pick = jnp.sum(G * onehot, axis=1)                                # (Nb,)
-    return g_pick * self._interface_mask(quad).astype(g_pick.dtype)     # zero on global rows
+  def _interface_mask(self, quad):
+    # True on interface Γ, False on physical global boundary
+    mask_g = getattr(quad, "boundary_mask_global", None)
+    if mask_g is None:
+      # If your DDQuadrature always sets this, you can raise instead.
+      # Fallback: assume entire boundary is interface (safe for tests).
+      Nb = quad.boundary_x.shape[0]
+      return jnp.ones((Nb,), dtype=bool)
+    return ~mask_g
 
   def bilinear_form(self):
-    a_base = self.base.bilinear_form()
-    inv_eps_int = 1.0 / self.eps_interface
+    a_base = self.base.bilinear_form() if hasattr(self.base, "bilinear_form") else self.base.bilinear()
+    inv_eps = 1.0 / self.eps_interface
 
-    def a(u: FunctionState, v: FunctionState, quad: Quadrature) -> jax.Array:
+    def a(u, v, quad):
       A0 = a_base(u=u, v=v, quad=quad)
-      # interface penalty (branch-free)
-      mask_int = self._interface_mask(quad).astype(quad.boundary_w.dtype)    # (Nb,)
-      gamma_int = inv_eps_int * quad.boundary_w * mask_int                   # (Nb,)
-      Aint = jnp.einsum("an,am,a->nm", u.boundary, v.boundary, gamma_int)    # (n_u, n_v)
+      # interface mask: True on artificial boundary (NOT global physical)
+      mask_g = getattr(quad, "boundary_mask_global", None)
+      mask_int = (1 - mask_g.astype(quad.boundary_w.dtype)) if mask_g is not None else jnp.ones_like(quad.boundary_w)
+
+      gamma_int = (1.0 / self.eps_interface) * quad.boundary_w * mask_int
+      Aint = jnp.einsum("an,am,a->nm", u.boundary, v.boundary, gamma_int)
       return A0 + Aint
     return a
 
   def linear_operator(self):
     L_base = self.base.linear_operator()
-    inv_eps_int = 1.0 / self.eps_interface
+    inv_eps = 1.0 / self.eps_interface
 
-    def L(v: FunctionState, quad: Quadrature) -> jax.Array:
-      L0 = L_base(v=v, quad=quad)
-      mask_int = self._interface_mask(quad).astype(quad.boundary_w.dtype)    # (Nb,)
-      g_b = self._g_on_boundary(quad)                                        # (Nb,)
-      h_int = inv_eps_int * g_b                                              # (Nb,)
-      Fint = jnp.einsum("a,an,a->n", h_int, v.boundary, quad.boundary_w * mask_int)
-      return L0 + Fint
+    def L(v, quad):
+      L0  = L_base(v=v, quad=quad)
+      g_b = self._g_on_boundary(quad)
+      mask_g = getattr(quad, "boundary_mask_global", None)
+      mask_int = (1 - mask_g.astype(quad.boundary_w.dtype)) if mask_g is not None else jnp.ones_like(quad.boundary_w)
+
+      L_int = jnp.einsum("a,an,a->n", (1.0 / self.eps_interface) * g_b, v.boundary, quad.boundary_w * mask_int)
+      return L0 + L_int
     return L
 
   def energy_norm(self):

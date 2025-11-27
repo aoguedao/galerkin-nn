@@ -8,7 +8,7 @@ from typing import Callable
 from flax import struct
 
 from galerkinnn import FunctionState, PDE, Quadrature, GalerkinNN
-from galerkinnn.quadratures import gauss_legendre_interval_quadrature
+from galerkinnn.quadratures import interval_quadrature
 
 # -------------------------
 # Hyper-parameters
@@ -130,7 +130,8 @@ def u_exact_k1px_f10(X: jax.Array, h0: float, hL: float, Tinf: float) -> jax.Arr
 # Build quadrature, PDE, and solve
 # -------------------------
 xbounds = (0.0, 1.0)
-quad = gauss_legendre_interval_quadrature(xbounds, ng=128)
+n_train = 256
+quad = interval_quadrature(xbounds, n_train)
 
 # Choose the analytic-comparable case:
 k  = lambda X: 1.0 + X[:, 0:1]               # (N,1)

@@ -8,7 +8,7 @@ from typing import Callable
 
 from galerkinnn.utils import make_u_fn, compare_num_exact_2d
 from galerkinnn import FunctionState, PDE, GalerkinNN
-from galerkinnn.quadratures import gauss_lobatto_rectangle_quadrature
+from galerkinnn.quadratures import rectangle_quadrature
 
 # Hyper-parameters
 seed = 42
@@ -21,7 +21,7 @@ tol_basis = 1e-7
 n_val = 1024
 N = 5  # Init Neurons
 r = 2  # Neurons Growth
-A = 5e-3  # Init Learning Rate
+A = 1e-3  # Init Learning Rate
 rho = 1.1  # Learning Rate Growth
 
 
@@ -59,7 +59,6 @@ class PoissonUnitSquareRobinBC(PDE):
   # ---------- exact solution & data ----------
   def exact_solution(self):
     """Return callable u_exact(X): (N,2)->(N,1)."""
-    kappa = self.kappa  # unused but keeps signature pattern
     c = jnp.array(self.c, dtype=jnp.float32)
     def u_exact(X: jax.Array) -> jax.Array:
       x, y = X[:, 0], X[:, 1]
@@ -181,15 +180,17 @@ def activations_fn(i):
     return jnp.tanh(scale_i * x)
   return activation
 
-network_widths_fn = lambda i: N * r ** (i - 1)
+# network_widths_fn  = lambda i: N * r ** (i - 1)
+network_widths_fn = lambda i: jnp.min(jnp.array([N * r ** (i - 1), 1300]))
 learning_rates_fn = lambda i: A * rho ** (-(i - 1))
 
 
 # Galerkin Neural Network Solver
 bounds = ((0.0, 1.0), (0.0, 1.0))
-ng = 256
-quad = gauss_lobatto_rectangle_quadrature(bounds=bounds, ng=ng)
-eps = 1e-4
+nx, ny = 128, 128
+n_edge = 128
+quad = rectangle_quadrature(bounds=bounds, nx=nx, ny=ny, n_edge=n_edge)
+eps = 1e-2
 pde = PoissonUnitSquareRobinBC(eps=eps)
 u0_fn = lambda X: jnp.zeros(shape=(X.shape[0], 1))
 u0_grad = lambda X: jnp.zeros_like(X)
@@ -226,6 +227,4 @@ def u_exact_fn(X: jax.Array):
   c = jnp.asarray(pde.c, dtype=X.dtype)
   return (jnp.sin(jnp.pi * x) * jnp.sin(jnp.pi * y) + c).reshape(-1, 1)
 
-fig, ax = compare_num_exact_2d(quad.interior_x, u_num_fn, u_exact_fn, kind="tri", error_kind="relative", savepath="cmp2d_tri.png")
-
-# %%
+fig, ax = compare_num_exact_2d(quad.interior_x, u_num_fn, u_exact_fn, kind="tri", error_kind="relative", savepath="images/poisson2D_rectangle.png")

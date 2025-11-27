@@ -7,7 +7,7 @@ from typing import Callable
 from flax import struct
 
 from galerkinnn import FunctionState, PDE, Quadrature, GalerkinNN
-from galerkinnn.quadratures import gauss_legendre_disk_quadrature
+from galerkinnn.quadratures import disk_quadrature
 
 # -------------------------
 # Hyper-parameters
@@ -91,7 +91,7 @@ learning_rates_fn = lambda i: A * rho ** (-(i - 1))
 # -------------------------
 R = 1.0
 nr, nt = 128, 128
-quad = gauss_legendre_disk_quadrature(nr=nr, nt=nt, R=R)
+quad = disk_quadrature(radius=R, n_r=nr, n_theta=nt)
 
 # -------------------------
 # Variable k(x,y) with angular + radial modulation and two Gaussian bumps.

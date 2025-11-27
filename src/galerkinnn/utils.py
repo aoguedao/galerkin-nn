@@ -5,6 +5,8 @@ import matplotlib.pyplot as plt
 from matplotlib.tri import Triangulation
 from typing import Callable, Optional, Tuple, Literal, Sequence
 
+from .quadratures import Quadrature
+
 UFn   = Callable[[jax.Array], jax.Array]  # X -> (N,1)
 SigmaFn = Callable[..., jax.Array]  # expects fn(X=...) -> (N, m_i) or (N,1)
 
@@ -13,42 +15,142 @@ SigmaFn = Callable[..., jax.Array]  # expects fn(X=...) -> (N, m_i) or (N,1)
 # ---------------------------
 
 def make_u_fn(
-  sigma_net_fn_list: Sequence[SigmaFn],
-  u_coeff: jax.Array,                       # (B,1)
-  basis_coeff_list: Optional[Sequence[jax.Array]] = None  # each (m_i,1) if nets are vector-valued
+  sigma_net_fn_list: Sequence[Callable[[jax.Array], jax.Array]],
+  u_coeff: jax.Array,                          # (B,) or (B,1)
+  basis_coeff_list: Sequence[jax.Array],       # each (m_i,) or (m_i,1)
 ) -> Callable[[jax.Array], jax.Array]:
   """
-  Builds u(X). If basis_coeff_list is given (or fn outputs are not scalar),
-  we project each sigma-net output (N,m_i) -> (N,1) using its coeff.
+  Build u(X) = sum_i [ (σ_i(X) @ α_i) * c_i ].
+
+  σ_i : ℝ^{N×m_i},  α_i : ℝ^{m_i×1},  c_i : scalar
+  Returns u_fn(X): ℝ^{N×1}.
   """
   B = len(sigma_net_fn_list)
-  if u_coeff.ndim == 1:
-    u_coeff = u_coeff[:, None]          # ensure (B,1)
 
+  u_coeff = jnp.asarray(u_coeff)
+  if u_coeff.ndim == 2:
+    assert u_coeff.shape[1] == 1
+    u_coeff = u_coeff[:, 0]
+  assert u_coeff.shape[0] == B, f"u_coeff has {u_coeff.shape[0]} entries, expected {B}"
+
+  alpha_list = [jnp.asarray(ai).reshape(-1, 1) for ai in basis_coeff_list]
+
+  @jax.jit
   def u_fn(X: jax.Array) -> jax.Array:
-    cols = []
-    for i, fn in enumerate(sigma_net_fn_list):
-      out = fn(X=X)                     # (N,m_i) or (N,1)
-      if out.ndim != 2 or out.shape[0] != X.shape[0]:
-        raise ValueError(f"sigma_net_fn[{i}] returned shape {out.shape}, expected (N,m).")
-
-      # If already scalar, keep it. Otherwise project with basis_coeff_list[i].
-      if out.shape[1] == 1:
-        phi_i = out                     # (N,1)
-      else:
-        if basis_coeff_list is None:
-          raise ValueError(
-            f"sigma_net_fn[{i}] returned (N,{out.shape[1]}), but no basis_coeff_list given."
-          )
-        coeff_i = basis_coeff_list[i]
-        if coeff_i.ndim == 1: coeff_i = coeff_i[:, None]   # (m_i,1)
-        phi_i = out @ coeff_i                               # (N,1)
-      cols.append(phi_i)
-
-    Phi = jnp.concatenate(cols, axis=1)   # (N,B)
-    return Phi @ u_coeff                  # (N,1)
+    y = jnp.zeros((X.shape[0], 1), dtype=X.dtype)
+    for fn, ai, ci in zip(sigma_net_fn_list, alpha_list, u_coeff):
+      phi_i = fn(X=X) @ ai  # (N,1)
+      y += phi_i * ci
+    return y
 
   return u_fn
+
+
+def make_u_and_grad_fn(
+  sigma_net_fn_list: Sequence[Callable[[jax.Array], jax.Array]],
+  u_coeff: jax.Array,
+  basis_coeff_list: Sequence[jax.Array],
+) -> Tuple[Callable[[jax.Array], jax.Array], Callable[[jax.Array], jax.Array]]:
+  """
+  Returns (u_fn, grad_u_fn) where both are JAX-differentiable.
+
+  u(X) = sum_i [ (σ_i(X) @ α_i) * c_i ].
+  grad_u(X) = ∂ₓu(X) with shape (N,1,dim).
+  """
+  B = len(sigma_net_fn_list)
+
+  u_coeff = jnp.asarray(u_coeff)
+  if u_coeff.ndim == 2:
+    assert u_coeff.shape[1] == 1
+    u_coeff = u_coeff[:, 0]
+  assert u_coeff.shape[0] == B, f"u_coeff has {u_coeff.shape[0]} entries, expected {B}"
+
+  alpha_list = [jnp.asarray(ai).reshape(-1, 1) for ai in basis_coeff_list]
+
+  def u_fn(X: jax.Array) -> jax.Array:
+    y = jnp.zeros((X.shape[0], 1), dtype=X.dtype)
+    for fn, ai, ci in zip(sigma_net_fn_list, alpha_list, u_coeff):
+      phi_i = fn(X=X) @ ai
+      y += phi_i * ci
+    return y
+
+  def grad_u_fn(X: jax.Array) -> jax.Array:
+    grads = []
+    for fn, ai, ci in zip(sigma_net_fn_list, alpha_list, u_coeff):
+      # JAX requires positional arg for jacfwd, so wrap in lambda with positional X
+      G = jax.jacfwd(lambda X_: fn(X=X_))(X)  # (N,m_i,dim)
+      g_i = jnp.einsum("nmd,mi->nid", G, ai) * ci  # (N,1,dim)
+      grads.append(g_i)
+    return jnp.sum(jnp.stack(grads, axis=0), axis=0)  # (N,1,dim)
+
+  return jax.jit(u_fn), jax.jit(grad_u_fn)
+
+def make_impedance_trace(u_fn, quad_target, kappa_fn, delta):
+  a_t = float(quad_target.boundary_x[0, 0])
+  b_t = float(quad_target.boundary_x[-1, 0])
+
+  def n_from_X(X):
+    x = X.reshape(-1)
+    is_left  = jnp.isclose(x, a_t, atol=1e-12)
+    is_right = jnp.isclose(x, b_t, atol=1e-12)
+    # outward: left = -1, right = +1
+    return (is_right.astype(X.dtype) - is_left.astype(X.dtype)).reshape(-1, 1)
+
+  def u_scalar(x):
+    return u_fn(x[None, :]).reshape(())
+  grad_batch = jax.vmap(jax.grad(u_scalar))
+
+  @jax.jit
+  def g(X):
+    uval = u_fn(X).reshape(-1, 1)                    # (Nb,1)
+    du   = grad_batch(X).reshape(X.shape[0], 1)       # (Nb,1) in 1D
+    n    = n_from_X(X)                                # (Nb,1)
+    kn   = kappa_fn(X).reshape(-1, 1)                 # (Nb,1)  -- TARGET κ
+    return uval + delta * kn * (du * n)               # (Nb,1)
+  return g
+
+
+# ---------------------------
+# Shape-test helpers (private)
+# ---------------------------
+def _dummy_quadrature(dim: int, n_interior: int = 3, n_boundary: int = 2) -> Quadrature:
+  """
+  Lightweight quadrature stub for shape checking; values are placeholders.
+  """
+  interior_x = jnp.ones((n_interior, dim))
+  interior_w = jnp.ones((n_interior,))
+  boundary_x = jnp.ones((n_boundary, dim))
+  boundary_w = jnp.ones((n_boundary,))
+  boundary_tangent = jnp.ones((n_boundary, dim))
+  boundary_normal = jnp.ones((n_boundary, dim))
+  meta = {"shape_test": True, "dim": dim}
+  return Quadrature(
+    dim=dim,
+    interior_x=interior_x,
+    interior_w=interior_w,
+    boundary_x=boundary_x,
+    boundary_w=boundary_w,
+    boundary_tangent=boundary_tangent,
+    boundary_normal=boundary_normal,
+    meta=meta,
+  )
+
+
+def _dummy_state(quad: Quadrature, n_states: int):
+  """
+  Minimal FunctionState-like payload filled with ones for shape testing.
+  Returned object is a simple namespace with the expected attributes.
+  """
+  Ni, Nb, dim = quad.interior_x.shape[0], quad.boundary_x.shape[0], quad.dim
+  class _FS:
+    pass
+  fs = _FS()
+  fs.interior = jnp.ones((Ni, n_states))
+  fs.boundary = jnp.ones((Nb, n_states))
+  fs.grad_interior = jnp.ones((Ni, n_states, dim))
+  fs.grad_boundary = jnp.ones((Nb, n_states, dim))
+  fs.n_states = n_states
+  return fs
 
 # ---------------------------
 # 1D comparison
@@ -112,16 +214,29 @@ def compare_num_exact_2d(
   u_num_fn: UFn,
   u_exact_fn: UFn,
   kind: Literal["scatter","tri"] = "scatter",
-  titles: Tuple[str, str, str] = ("Exact", "Numerical", "Error (num - exact)"),
+  titles: Optional[Tuple[str, str, str]] = None,
+  error_kind: Literal["absolute", "relative"] = "absolute",
   savepath: Optional[str] = None,
 ):
   """
-  2D: three panels (exact / numerical / error).
+  2D: three panels (exact / numerical / error or relative error).
   kind = 'scatter' (fast, pointwise) or 'tri' (triangulated interpolation).
+  error_kind selects the third panel: absolute error (num - exact) or relative
+  error (num - exact) / |exact|.
   """
   x, y, un = _values_2d(X, u_num_fn)
   _, _, ue  = _values_2d(X, u_exact_fn)
   err = un - ue
+  if error_kind == "relative":
+    eps = np.finfo(err.dtype).eps if np.issubdtype(err.dtype, np.floating) else 1e-12
+    denom = np.maximum(np.abs(ue), eps)
+    err = err / denom
+  elif error_kind != "absolute":
+    raise ValueError("error_kind must be 'absolute' or 'relative'")
+
+  if titles is None:
+    third = "Relative Error" if error_kind == "relative" else "Error (num - exact)"
+    titles = ("Exact", "Numerical", third)
 
   fig, ax = plt.subplots(1, 3, figsize=(15, 5), constrained_layout=True)
   panel = _scatter_panel if kind == "scatter" else _tri_panel

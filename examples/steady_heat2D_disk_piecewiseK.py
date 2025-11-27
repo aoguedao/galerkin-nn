@@ -7,7 +7,7 @@ from typing import Callable
 from flax import struct
 
 from galerkinnn import FunctionState, PDE, Quadrature, GalerkinNN
-from galerkinnn.quadratures import gauss_legendre_disk_quadrature
+from galerkinnn.quadratures import disk_quadrature
 
 # -------------------------
 # Hyper-parameters
@@ -94,7 +94,7 @@ def activations_fn(i: int):
   s = 1.5 * i
   return lambda x: jnp.tanh(s * x)
 
-WIDTH_CAP = 512  # or 96/128 if memory allows
+WIDTH_CAP = 512
 network_widths_fn = lambda i: min(WIDTH_CAP, N * r**(i-1))
 
 # network_widths_fn = lambda i: N * r ** (i - 1)
@@ -103,7 +103,7 @@ learning_rates_fn = lambda i: A * rho ** (-(i - 1))
 # geometry
 R = 1.0
 nr, nt = 220, 256         # a bit denser helps across jumps
-quad = gauss_legendre_disk_quadrature(nr=nr, nt=nt, R=R)
+quad = disk_quadrature(radius=R, n_r=nr, n_theta=nt)
 
 # -------------------------
 # Piecewise-constant k in three annuli

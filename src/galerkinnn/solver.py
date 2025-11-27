@@ -4,10 +4,13 @@ import optax
 
 from dataclasses import dataclass
 from functools import partial
-from typing import Callable
+from typing import Callable, Union, List, Sequence, Optional
 
-from .formulations import PDE, FunctionState
+from .formulations import FunctionState, PDE, DDPDE
 from .quadratures import Quadrature
+from .utils import make_u_fn, make_impedance_trace
+
+TraceFn = Callable[[jax.Array], jax.Array]
 
 jax.config.update("jax_enable_x64", True)
 
@@ -70,8 +73,8 @@ class GalerkinNN:
       F = residual(u=u, v=v, quad=quad)
       F = jnp.atleast_2d(F).T
       K = bilinear_form(u=v, v=v, quad=quad)
-      # coeff, _, _, _ = jnp.linalg.lstsq(K, F)
-      coeff = spd_solve(K, F)
+      coeff, _, _, _ = jnp.linalg.lstsq(K, F)
+      # coeff = spd_solve(K, F)
       return coeff
 
     error_eta = pde.error_eta()
@@ -178,8 +181,8 @@ class GalerkinNN:
       F = linear_op(v=bases, quad=quad)
       F = jnp.atleast_2d(F).T
       K = bilinear_form(u=bases, v=bases, quad=quad)
-      # coeff, _, _, _ = jnp.linalg.lstsq(K, F)
-      coeff = spd_solve(K, F)
+      coeff, _, _, _ = jnp.linalg.lstsq(K, F)
+      # coeff = spd_solve(K, F)
       # jax.debug.print("K shape {}", K.shape)
       # jax.debug.print("F shape before solve {}", F.shape)
       # jax.debug.print("u_coeff shape after solve {}", coeff.shape)
@@ -264,3 +267,192 @@ class GalerkinNN:
       bstep += 1
 
     return u, u_coeff, eta_errors, basis_list, basis_params_list, basis_coeff_list, sigma_net_fn_list
+
+
+def _zeros_like_boundary(quad) -> TraceFn:
+  return lambda X: jnp.zeros((X.shape[0], 1), dtype=X.dtype)
+
+
+def _relax_fn(new_f: TraceFn, old_f: Optional[TraceFn], omega: float) -> TraceFn:
+  if old_f is None or omega == 1.0:
+    return new_f
+  return lambda X: (1.0 - omega) * old_f(X) + omega * new_f(X)
+
+
+class GalerkinNNDD:
+  """
+  Galerkin Neural Networks — Domain Decomposition (overlapping Schwarz).
+
+  Parameters
+  ----------
+  base_pde : PDE | Sequence[PDE]
+    Single PDE template (used for all subdomains) or a list per subdomain.
+    For piecewise κ, pass a *template* and use `with_k` externally to make
+    per-side PDEs before constructing this class.
+  quadratures : Sequence[DDQuadrature]
+    One quadrature per subdomain.
+  eps_interface : float
+    Robin/impedance parameter δ used on Γ_i via DDPDE.
+  transmission : {'impedance','dirichlet'}
+    'impedance' uses g = u_j + δ κ_i ∂_{n_i}u_j (recommended),
+    'dirichlet' uses g = u_j.
+  trace_relaxation : float
+    Relaxation for traces (0 < omega ≤ 1).
+  """
+
+  def __init__(
+    self,
+    base_pde: Union[object, Sequence[object]],
+    quadratures: Sequence[object],
+    *,
+    eps_interface: float = 1e-5,
+    transmission: str = "impedance",
+    trace_relaxation: float = 1.0
+  ):
+    self.Q: List[object] = list(quadratures)
+    self.M: int = len(self.Q)
+    if self.M < 2:
+      raise ValueError("Need at least two subdomains.")
+
+    if isinstance(base_pde, (list, tuple)):
+      if len(base_pde) != self.M:
+        raise ValueError("len(base_pde) must match len(quadratures).")
+      self.PDE = list(base_pde)
+    else:
+      # broadcast the same PDE to all subdomains (OK for homogeneous κ)
+      self.PDE = [base_pde] * self.M
+
+    self.eps_interface = float(eps_interface)
+    self.transmission = transmission.lower()
+    if self.transmission not in ("impedance", "dirichlet"):
+      raise ValueError("transmission must be 'impedance' or 'dirichlet'")
+    self.trace_relaxation = float(trace_relaxation)
+
+    # traces per target i: tuple of length = Q[i].neighbor_ids
+    self._g_per_target: List[List[Optional[TraceFn]]] = [
+      [None] * getattr(Qi, "boundary_owner_onehot").shape[1] for Qi in self.Q
+    ]
+
+  def solve(
+    self,
+    *,
+    net_fn,
+    activations_fn,
+    network_widths_fn,
+    learning_rates_fn,
+    max_bases: int,
+    max_epoch_basis: int,
+    tol_solution: float,
+    tol_basis: float,
+    seeds: Optional[Sequence[int]] = None,
+    max_sweeps: int = 8,
+    tol_jump: float = 5e-4,
+    init_states: Optional[Sequence[object]] = None
+  ):
+    """
+    Runs Gauss-Seidel Schwarz sweeps across all subdomains.
+    Returns:
+      dict(u_fns=[...], logs=[...])
+    """
+    M = self.M
+    Q = self.Q
+    PDE = self.PDE
+    eps_int = self.eps_interface
+
+    # seeds per subdomain
+    if seeds is None:
+      seeds = [42 + 100*i for i in range(M)]
+    else:
+      if len(seeds) != M:
+        raise ValueError("len(seeds) must match number of subdomains.")
+
+    # initial states: zero FunctionState on each subdomain
+    if init_states is None:
+      z = lambda X: jnp.zeros((X.shape[0], 1), dtype=X.dtype)
+      gradz = lambda X: jnp.zeros((X.shape[0], 1, Q[0].dim), dtype=X.dtype)
+      states = [FunctionState.from_function(z, Qi, gradz) for Qi in Q]
+    else:
+      states = list(init_states)
+
+    # initialize trace lists with zero functions where needed
+    for i in range(M):
+      onehot = getattr(Q[i], "boundary_owner_onehot")
+      Jn = onehot.shape[1]
+      for jcol in range(Jn):
+        if self._g_per_target[i][jcol] is None:
+          self._g_per_target[i][jcol] = _zeros_like_boundary(Q[i])
+
+    # place-holders for current u_fn per subdomain
+    u_fns: List[Callable[[jax.Array], jax.Array]] = [
+      _zeros_like_boundary(Q[i]) for i in range(M)
+    ]
+
+    history = []
+    # main Schwarz sweeps (Gauss–Seidel)
+    for k in range(max_sweeps):
+      for i in range(M):
+        # assemble DDPDE on target i with current trace tuple (ordered by neighbor_ids)
+        trace_tuple = tuple(self._g_per_target[i])
+        pde_i = DDPDE(base=PDE[i], eps_interface=eps_int, trace_fns=trace_tuple)
+
+        solver_i = GalerkinNN(pde_i, Q[i])
+        out = solver_i.solve(
+          seed=seeds[i] + 100*k,
+          u0=states[i],
+          net_fn=net_fn,
+          activations_fn=activations_fn,
+          network_widths_fn=network_widths_fn,
+          learning_rates_fn=learning_rates_fn,
+          max_bases=max_bases,
+          max_epoch_basis=max_epoch_basis,
+          tol_solution=tol_solution,
+          tol_basis=tol_basis,
+        )
+        u_state_out_i, u_coeff_i, *_rest, basis_coeff_list_i, sigma_net_fn_list_i = out
+        u_fn_i = make_u_fn(sigma_net_fn_list_i, u_coeff=u_coeff_i, basis_coeff_list=basis_coeff_list_i)
+        u_fns[i] = u_fn_i  # store latest
+
+        # update neighbor traces that depend on subdomain i
+        self._update_neighbor_traces_from(i, u_fn_i)
+
+      # optional diagnostic for 2-subdomain 1D case (interface jump)
+      if M == 2 and Q[0].dim == 1:
+        x_if_R = Q[0].boundary_x[-1:]
+        x_if_L = Q[1].boundary_x[:1]
+        u0_if = jnp.squeeze(u_fns[0](x_if_R)).item()
+        u1_if = jnp.squeeze(u_fns[1](x_if_L)).item()
+        jump  = u0_if - u1_if
+        history.append(dict(sweep=k+1, u0_if=u0_if, u1_if=u1_if, jump=jump))
+        print(f"[sweep {k+1:02d}] u0(b0^+)={u0_if:+.6e}, u1(a1^-)={u1_if:+.6e}, jump={jump:+.6e}")
+        if abs(jump) < tol_jump:
+          break
+
+    return dict(u_fns=u_fns, logs=history)
+
+
+  def _update_neighbor_traces_from(self, src_idx: int, u_fn_src: Callable[[jax.Array], jax.Array]):
+    """
+    After solving on Ω_src, build traces for every *target* Ω_tgt that lists src_idx
+    among its neighbor_ids. Impedance uses κ from the *target* PDE.
+    """
+    for tgt_idx, Qt in enumerate(self.Q):
+      # find which column corresponds to src_idx in target's onehot
+      nids = getattr(Qt, "neighbor_ids")
+      if nids is None:
+        # assume pairwise 2-subdomain setup; if not, skip
+        continue
+      if src_idx not in nids:
+        continue
+      jcol = nids.index(src_idx)  # column in boundary_owner_onehot / trace_fns
+
+      # build new trace for target
+      if self.transmission == "impedance":
+        # target-side κ via k(X) of PDE[tgt_idx]
+        kappa_t = self.PDE[tgt_idx].k
+        g_new = make_impedance_trace(u_fn_src, Qt, kappa_t, self.eps_interface)
+      else:
+        g_new = lambda X, f=u_fn_src: f(X)
+
+      # relax into current stored trace
+      g_old = self._g_per_target[tgt_idx][jcol]
+      self._g_per_target[tgt_idx][jcol] = _relax_fn(g_new, g_old, self.trace_relaxation)  
