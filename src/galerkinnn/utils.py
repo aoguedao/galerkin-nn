@@ -198,14 +198,14 @@ def _values_2d(X: jax.Array, u_fn: UFn) -> Tuple[np.ndarray, np.ndarray, np.ndar
   val  = np.asarray(u_fn(X)).reshape(-1)
   return x, y, val
 
-def _scatter_panel(ax, x, y, val, title, cmap="viridis"):
-  sc = ax.scatter(x, y, c=val, s=12, cmap=cmap)
+def _scatter_panel(ax, x, y, val, title, cmap="viridis", vmin=None, vmax=None):
+  sc = ax.scatter(x, y, c=val, s=12, cmap=cmap, vmin=vmin, vmax=vmax)
   ax.set_title(title); ax.set_aspect("equal")
   plt.colorbar(sc, ax=ax)
 
-def _tri_panel(ax, x, y, val, title, cmap="viridis"):
+def _tri_panel(ax, x, y, val, title, cmap="viridis", vmin=None, vmax=None):
   tri = Triangulation(x, y)
-  tpc = ax.tripcolor(tri, val, shading="gouraud", cmap=cmap)
+  tpc = ax.tripcolor(tri, val, shading="gouraud", cmap=cmap, vmin=vmin, vmax=vmax)
   ax.set_title(title); ax.set_aspect("equal")
   plt.colorbar(tpc, ax=ax)
 
@@ -226,7 +226,7 @@ def compare_num_exact_2d(
   """
   x, y, un = _values_2d(X, u_num_fn)
   _, _, ue  = _values_2d(X, u_exact_fn)
-  err = un - ue
+  err = np.abs(un - ue)
   if error_kind == "relative":
     eps = np.finfo(err.dtype).eps if np.issubdtype(err.dtype, np.floating) else 1e-12
     denom = np.maximum(np.abs(ue), eps)
@@ -243,8 +243,11 @@ def compare_num_exact_2d(
   if kind not in ("scatter", "tri"):
     raise ValueError("kind must be 'scatter' or 'tri'")
 
-  panel(ax[0], x, y, ue,  titles[0], cmap="viridis")
-  panel(ax[1], x, y, un,  titles[1], cmap="viridis")
+  vmin = float(np.minimum(ue.min(), un.min()))
+  vmax = float(np.maximum(ue.max(), un.max()))
+
+  panel(ax[0], x, y, ue,  titles[0], cmap="viridis", vmin=vmin, vmax=vmax)
+  panel(ax[1], x, y, un,  titles[1], cmap="viridis", vmin=vmin, vmax=vmax)
   panel(ax[2], x, y, err, titles[2], cmap="RdBu")
 
   if savepath:

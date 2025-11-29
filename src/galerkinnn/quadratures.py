@@ -2,7 +2,6 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from dataclasses import replace
 from flax import struct
 from typing import Tuple, Dict, Any
 
@@ -54,8 +53,7 @@ def gauss_legendre_reference(
   n-point Gauss–Legendre quadrature on [-1, 1].
   Uses numpy.polynomial.legendre.leggauss under the hood (not jit'ed).
   """
-  from numpy.polynomial.legendre import leggauss
-  x_np, w_np = leggauss(n)
+  x_np, w_np = np.polynomial.legendre.leggauss(n)
   x = jnp.asarray(x_np, dtype=dtype)
   w = jnp.asarray(w_np, dtype=dtype)
   return x, w
@@ -629,96 +627,116 @@ def dd_overlapping_rectangle_quadratures(
   return Q0, Q1
 
 
+def dd_overlapping_rectangle_four_quadratures(
+  bounds: Tuple[Tuple[float, float], Tuple[float, float]] = ((0.0, 1.0), (0.0, 1.0)),
+  midx: float = 0.5,
+  midy: float = 0.5,
+  overlapx: float = 0.2,
+  overlapy: float = 0.2,
+  nx: int = 16,
+  ny: int = 16,
+  n_edge: int | None = None,
+):
+  """
+  Build four overlapping rectangular DDQuadratures on [a,b]x[c,d], split around (midx, midy).
+
+  Subdomains (with overlaps overlapx/overlapy around the midlines):
+    0: [a, midx + overlapx/2] x [c, midy + overlapy/2]          (bottom-left)
+    1: [midx - overlapx/2, b] x [c, midy + overlapy/2]          (bottom-right)
+    2: [a, midx + overlapx/2] x [midy - overlapy/2, d]          (top-left)
+    3: [midx - overlapx/2, b] x [midy - overlapy/2, d]          (top-right)
+
+  Boundary ownership: points on the global boundary are marked global (-1);
+  interior boundary points are owned by the first neighbor (ascending id) whose
+  subdomain contains the point.
+  """
+  (a, b), (c, d) = bounds
+  if not (b > a and d > c):
+    raise ValueError("Invalid bounds for rectangle.")
+  if not (0.0 < overlapx < (b - a)):
+    raise ValueError("overlapx must be in (0, b-a)")
+  if not (0.0 < overlapy < (d - c)):
+    raise ValueError("overlapy must be in (0, d-c)")
+  if not (a <= midx <= b and c <= midy <= d):
+    raise ValueError("midx/midy must lie inside the bounds.")
+
+  left_b = float(jnp.clip(midx + 0.5 * overlapx, a, b))
+  right_a = float(jnp.clip(midx - 0.5 * overlapx, a, b))
+  top_a = float(jnp.clip(midy - 0.5 * overlapy, c, d))
+  bottom_b = float(jnp.clip(midy + 0.5 * overlapy, c, d))
+
+  if not (right_a < left_b and top_a < bottom_b):
+    raise ValueError("Invalid overlap: subdomains do not overlap.")
+
+  rects = (
+    (float(a), left_b, float(c), bottom_b),       # subdomain 0
+    (right_a, float(b), float(c), bottom_b),      # subdomain 1
+    (float(a), left_b, top_a, float(d)),          # subdomain 2
+    (right_a, float(b), top_a, float(d)),         # subdomain 3
+  )
+
+  q0 = rectangle_quadrature(((rects[0][0], rects[0][1]), (rects[0][2], rects[0][3])), nx=nx, ny=ny, n_edge=n_edge)
+  q1 = rectangle_quadrature(((rects[1][0], rects[1][1]), (rects[1][2], rects[1][3])), nx=nx, ny=ny, n_edge=n_edge)
+  q2 = rectangle_quadrature(((rects[2][0], rects[2][1]), (rects[2][2], rects[2][3])), nx=nx, ny=ny, n_edge=n_edge)
+  q3 = rectangle_quadrature(((rects[3][0], rects[3][1]), (rects[3][2], rects[3][3])), nx=nx, ny=ny, n_edge=n_edge)
+
+  neighbors = (
+    (1, 2, 3),
+    (0, 2, 3),
+    (0, 1, 3),
+    (0, 1, 2),
+  )
+
+  def _owner_for_sub(boundary_x: jax.Array, neigh_ids: Tuple[int, ...]) -> jax.Array:
+    x = boundary_x[:, 0]
+    y = boundary_x[:, 1]
+    eps = 1e-12
+    is_global = (x <= a + eps) | (x >= b - eps) | (y <= c + eps) | (y >= d - eps)
+    owner = jnp.full((boundary_x.shape[0],), -1, dtype=jnp.int32)
+    for nid in neigh_ids:
+      ax_r, bx_r, ay_r, by_r = rects[nid]
+      in_rect = (
+        (x >= ax_r - eps) & (x <= bx_r + eps) &
+        (y >= ay_r - eps) & (y <= by_r + eps)
+      )
+      owner = jnp.where((owner == -1) & (~is_global) & in_rect, nid, owner)
+    return owner
+
+  owner0 = _owner_for_sub(jnp.asarray(q0.boundary_x), neighbors[0])
+  owner1 = _owner_for_sub(jnp.asarray(q1.boundary_x), neighbors[1])
+  owner2 = _owner_for_sub(jnp.asarray(q2.boundary_x), neighbors[2])
+  owner3 = _owner_for_sub(jnp.asarray(q3.boundary_x), neighbors[3])
+
+  Q0 = DDQuadrature.from_quadrature(
+    q0,
+    subdomain_id=0,
+    neighbor_ids=neighbors[0],
+    owner_j_at_bndry=owner0,
+  )
+  Q1 = DDQuadrature.from_quadrature(
+    q1,
+    subdomain_id=1,
+    neighbor_ids=neighbors[1],
+    owner_j_at_bndry=owner1,
+  )
+  Q2 = DDQuadrature.from_quadrature(
+    q2,
+    subdomain_id=2,
+    neighbor_ids=neighbors[2],
+    owner_j_at_bndry=owner2,
+  )
+  Q3 = DDQuadrature.from_quadrature(
+    q3,
+    subdomain_id=3,
+    neighbor_ids=neighbors[3],
+    owner_j_at_bndry=owner3,
+  )
+
+  return Q0, Q1, Q2, Q3
+
 # -------------------------
 # DD Disk: Disk + Annulus
 # -------------------------
-def dd_disk_annulus_quadratures(
-  R: float,
-  r: float,
-  n_r_disk: int,
-  n_r_annulus: int,
-  n_theta: int,
-  dtype=jnp.float64,
-) -> Tuple[DDQuadrature, DDQuadrature]:
-  """
-  Domain decomposition of a disk of radius R into:
-    - subdomain 0: disk of radius r    (centered at origin)
-    - subdomain 1: annulus r <= |x| <= R
-
-  They share the circle |x| = r as an interface.
-  Only the outer circle |x| = R is a global physical boundary.
-
-  Both subdomains use the same n_theta angular quadrature so that
-  interface points line up.
-  """
-
-  if not (0.0 < r < R):
-    raise ValueError("Require 0 < r < R for disk-annulus decomposition.")
-
-  # --- Build geometric quadratures ---
-
-  q_disk = disk_quadrature(
-    radius=r,
-    n_r=n_r_disk,
-    n_theta=n_theta,
-    dtype=dtype,
-  )
-
-  q_ann = annulus_quadrature(
-    r_inner=r,
-    r_outer=R,
-    n_r=n_r_annulus,
-    n_theta=n_theta,
-    dtype=dtype,
-  )
-
-  # q_disk.boundary_x: n_theta points on circle r
-  # q_ann.boundary_x: 2*n_theta points, inner circle first, then outer circle
-  nb_disk = q_disk.boundary_x.shape[0]          # = n_theta
-  nb_ann  = q_ann.boundary_x.shape[0]           # = 2*n_theta
-
-  # -------------------------------
-  # Subdomain 0: inner disk (radius r)
-  # -------------------------------
-  sub0_id    = 0
-  sub0_neigh = (1,)   # only neighbor is annulus
-  # All boundary points of the disk lie on the interface with subdomain 1.
-  # Use the same convention as before: owner_j_at_bndry is the neighbor
-  # that "owns" that point; global boundary => -1.
-  # Here there is no global boundary for the disk.
-  owner0 = jnp.full((nb_disk,), 1, dtype=jnp.int32)  # all interface, owned by neighbor 1
-  Q_disk = DDQuadrature.from_quadrature(
-    q_disk,
-    subdomain_id=sub0_id,
-    neighbor_ids=sub0_neigh,
-    owner_j_at_bndry=owner0,
-  )
-
-  # -------------------------------
-  # Subdomain 1: annulus (r <= |x| <= R)
-  # -------------------------------
-  sub1_id    = 1
-  sub1_neigh = (0,)   # only neighbor is inner disk
-
-  # annulus boundary ordering from annulus_quadrature:
-  # [inner circle (index 0:n_theta), outer circle (index n_theta:2*n_theta)]
-  n_theta_ann = q_ann.meta["n_theta"]
-  if n_theta_ann != n_theta:
-    raise ValueError("disk_quadrature and annulus_quadrature must use the same n_theta.")
-
-  owner1 = jnp.full((nb_ann,), -1, dtype=jnp.int32)  # default: global
-  # inner circle (interface with disk) is owned by subdomain 0
-  owner1 = owner1.at[:n_theta].set(0)
-  Q_ann = DDQuadrature.from_quadrature(
-    q_ann,
-    subdomain_id=sub1_id,
-    neighbor_ids=sub1_neigh,
-    owner_j_at_bndry=owner1,
-  )
-
-  return Q_disk, Q_ann
-
-
 def dd_overlapping_disk_annulus_quadratures(
   R: float,
   r: float,
@@ -835,3 +853,110 @@ def dd_overlapping_disk_annulus_quadratures(
   )
 
   return Q_disk_dd, Q_ann_dd
+
+
+# -------------------------
+# DD Disk: Disk + Rectangle
+# -------------------------
+def dd_overlapping_disk_rectangle_quadratures(
+  R: float,
+  rect_bounds: Tuple[Tuple[float, float], Tuple[float, float]],
+  n_r: int,
+  n_theta: int,
+  nx: int,
+  ny: int,
+  n_edge: int | None = None,
+  dtype=jnp.float64,
+) -> Tuple[DDQuadrature, DDQuadrature]:
+  """
+  Two-overlapping-subdomain quadrature for a disk + rectangle configuration.
+
+  Geometry:
+    - Disk subdomain Ω0:   { (x,y): x^2 + y^2 <= R^2 }.
+    - Rect subdomain Ω1:   [ax, bx] × [ay, by].
+
+  Global domain is the UNION:
+      Ω = Ω0 ∪ Ω1.
+
+  Boundary classification:
+    - Disk boundary points (on |x| = R):
+        * interface (artificial) if the point lies INSIDE the rectangle,
+        * physical (global) otherwise.
+    - Rectangle boundary points (on the rectangle edges):
+        * interface if the point lies INSIDE the disk,
+        * physical otherwise.
+
+  DD metadata:
+    - For the disk (subdomain_id=0, neighbor_ids=(1,)):
+        owner_j_at_bndry = 1 on interface arcs, -1 on physical arcs.
+    - For the rectangle (subdomain_id=1, neighbor_ids=(0,)):
+        owner_j_at_bndry = 0 on interface edges, -1 on physical edges.
+  """
+
+  (ax, bx), (ay, by) = rect_bounds
+  R = float(R)
+
+  # Base quadratures
+  q_disk = disk_quadrature(
+    radius=R,
+    n_r=n_r,
+    n_theta=n_theta,
+    dtype=dtype,
+  )
+
+  q_rect = rectangle_quadrature(
+    bounds=rect_bounds,
+    nx=nx,
+    ny=ny,
+    n_edge=n_edge,
+    dtype=dtype,
+  )
+
+  # ----------------------------------
+  # Subdomain 0: disk
+  # ----------------------------------
+  Xb0 = jnp.asarray(q_disk.boundary_x)  # (Nb0, 2)
+  x0 = Xb0[:, 0]
+  y0 = Xb0[:, 1]
+
+  in_rect0 = (x0 >= ax) & (x0 <= bx) & (y0 >= ay) & (y0 <= by)
+  owner0 = jnp.where(in_rect0, 1, -1).astype(jnp.int32)
+
+  Q_disk_dd = DDQuadrature.from_quadrature(
+    q_disk,
+    subdomain_id=0,
+    neighbor_ids=(1,),
+    owner_j_at_bndry=owner0,
+    meta_update={
+      "dd_kind": "disk_rectangle_overlap",
+      "role": "disk",
+      "R_global": float(R),
+      "rect_bounds": ((float(ax), float(bx)), (float(ay), float(by))),
+    },
+  )
+
+  # ----------------------------------
+  # Subdomain 1: rectangle
+  # ----------------------------------
+  Xb1 = jnp.asarray(q_rect.boundary_x)  # (Nb1, 2)
+  x1 = Xb1[:, 0]
+  y1 = Xb1[:, 1]
+
+  r2_1 = x1**2 + y1**2
+  in_disk1 = r2_1 <= (R**2 + 1e-12)
+  owner1 = jnp.where(in_disk1, 0, -1).astype(jnp.int32)
+
+  Q_rect_dd = DDQuadrature.from_quadrature(
+    q_rect,
+    subdomain_id=1,
+    neighbor_ids=(0,),
+    owner_j_at_bndry=owner1,
+    meta_update={
+      "dd_kind": "disk_rectangle_overlap",
+      "role": "rectangle",
+      "R_global": float(R),
+      "rect_bounds": ((float(ax), float(bx)), (float(ay), float(by))),
+    },
+  )
+
+  return Q_disk_dd, Q_rect_dd

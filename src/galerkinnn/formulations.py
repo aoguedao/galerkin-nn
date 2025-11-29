@@ -88,9 +88,6 @@ class FunctionState:
     return self.interior.shape[1]
 
 
-
-
-
 @struct.dataclass
 class PDE(ABC):
 
@@ -103,7 +100,7 @@ class PDE(ABC):
       shape = tuple(arr.shape)
       if shape not in expected:
         raise ValueError(f"{name} returned shape {shape}, expected one of {expected}")
-  
+
     combos = ((1, 1), (1, 2), (2, 1))
     last_error = None
     for dim in _PDE_SHAPE_TEST_DIMS:
@@ -206,8 +203,15 @@ class DDPDE(PDE):
     """
     Nb = quad.boundary_x.shape[0]
     onehot = getattr(quad, "boundary_owner_onehot", None)
-    if onehot is None or onehot.shape[0] != Nb or not self.trace_fns:
+    neighbor_ids = getattr(quad, "neighbor_ids", None)
+    if onehot is None or onehot.shape[0] != Nb or not self.trace_fns or neighbor_ids is None:
       return jnp.zeros((Nb,), dtype=quad.boundary_w.dtype)
+
+    if len(self.trace_fns) != len(neighbor_ids):
+      raise ValueError("DDPDE.trace_fns must align with quad.neighbor_ids.")
+
+    if onehot.shape[1] != len(neighbor_ids):
+      raise ValueError("boundary_owner_onehot column count must match neighbor_ids.")
 
     cols = [fn(quad.boundary_x).reshape(-1) for fn in self.trace_fns]
     G = jnp.stack(cols, axis=1)
