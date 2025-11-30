@@ -6,8 +6,11 @@ subdomains (ASM/Robin-Schwarz). Manufactured solution:
 Boundary condition: κ ∂ₙ u + ε^{-1} u = h.
 """
 
+import json
 import time
 from typing import Callable, List, Tuple
+from datetime import datetime
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -18,33 +21,67 @@ from flax import struct
 
 from galerkinnn import FunctionState, DDPDE, GalerkinNN
 from galerkinnn.quadratures import dd_overlapping_rectangle_four_quadratures
-from galerkinnn.utils import make_u_fn, compare_num_exact_2d
+from galerkinnn.pou import build_pou_weights_rect4
+from galerkinnn.utils import make_u_fn, relax_fn, compare_num_exact_2d, as_coeff_vector, make_grad2d
+
+
+EXPERIMENT = "dd_rectangle_4dom"
+stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+output_path = Path() / "output" / EXPERIMENT / stamp
+images_path = output_path / "images"
+images_path.mkdir(parents=True, exist_ok=True)
 
 # ----------------------------
 # Parameters
 # ----------------------------
 bounds = ((0.0, 1.0), (0.0, 1.0))
 midx, midy = 0.5, 0.5
-overlapx, overlapy = 0.1, 0.1
-nx, ny = 96, 96
-n_edge = 96
+overlapx, overlapy = 0.2, 0.2
+nx, ny = 128, 128
+n_edge = 128
 
 eps_phys = 1e-1          # physical Robin ε on the outer boundary
 eps_interface = 1e-4     # interface impedance parameter ε_Γ
 kappa = 1.0
 
-max_sweeps = 4
-omega = 1.0
+max_sweeps = 8
+omega = 0.7
 
-max_bases = 6
-max_epoch_basis = 40
+max_bases = 4
+max_epoch_basis = 32
 seeds = [42, 43, 44, 45]
 
 N = 200      # base width per basis
-r = 2       # width growth factor
-A = 1e-3    # initial learning rate
+r = 100       # width growth factor
+A = 1e-2    # initial learning rate
 rho = 1.1   # LR decay per basis
+neuron_cap = 512
 
+config = {
+  "bounds": bounds,
+  "midx": midx,
+  "midy": midy,
+  "overlapx": overlapx,
+  "overlapy": overlapy,
+  "nx": nx,
+  "ny": ny,
+  "n_edge": n_edge,
+  "eps_phys": eps_phys,
+  "eps_interface": eps_interface,
+  "kappa": kappa,
+  "max_sweeps": max_sweeps,
+  "omega": omega,
+  "max_bases": max_bases,
+  "max_epoch_basis": max_epoch_basis,
+  "seeds": seeds,
+  "N": N,
+  "r": r,
+  "A": A,
+  "rho": rho,
+  "neuron_cap": neuron_cap
+}
+(output_path / "config.json").write_text(json.dumps(config, indent=2))
+print(config)
 
 # ----------------------------
 # Network
@@ -62,38 +99,14 @@ def activations_fn(i: int):
   return lambda x: jnp.tanh(scale * x)
 
 
-network_widths_fn = lambda i: int(min(N * (r ** (i - 1)), 512))
+# network_widths_fn = lambda i: int(min(N * (r ** (i - 1)), neuron_cap))
+network_widths_fn = lambda i: int(min(N + r * (i - 1) / 2, neuron_cap))
 learning_rates_fn = lambda i: A * (rho ** (-(i - 1)))
 
 
 # ----------------------------
 # Helpers
 # ----------------------------
-def as_coeff_vector(u_coeff):
-  if isinstance(u_coeff, (list, tuple)):
-    return jnp.array([jnp.asarray(c).reshape(-1)[0] for c in u_coeff])
-  c = jnp.asarray(u_coeff)
-  return c.reshape(-1)
-
-
-def make_grad2d(u_fn):
-  """Return grad_u(X) with shape (N,2)."""
-  def scalar_fn(xy):
-    return u_fn(xy.reshape(1, 2))[0, 0]
-  grad_scalar = jax.grad(scalar_fn)
-
-  @jax.jit
-  def grad(X):
-    X = jnp.asarray(X).reshape(-1, 2)
-    return jax.vmap(grad_scalar)(X)
-  return grad
-
-
-def relax_fn(new_fn, old_fn, omega_val: float):
-  if omega_val == 1.0:
-    return new_fn
-  return lambda X: (1 - omega_val) * old_fn(X) + omega_val * new_fn(X)
-
 
 def rectangle_normal(
   X: jax.Array,
@@ -227,40 +240,9 @@ class Poisson2DRobinConstK:
     return norm
 
 
-# ===========================
-# ======== MAIN ========
-# ===========================
-def build_pou_weights_rect4(Qs: Tuple) -> List[Callable[[jax.Array], jax.Array]]:
-  """Indicator-based normalized weights over four overlapping rectangles."""
-  rect_bounds = [Q.meta["bounds"] for Q in Qs]
-
-  def weight_fn(bounds_xy):
-    (ax, bx), (ay, by) = bounds_xy
-    def w(X):
-      X = jnp.asarray(X).reshape(-1, 2)
-      x = X[:, 0]
-      y = X[:, 1]
-      inside = (x >= ax) & (x <= bx) & (y >= ay) & (y <= by)
-      return inside.astype(jnp.float64).reshape(-1, 1)
-    return w
-
-  raw_w = [weight_fn(b) for b in rect_bounds]
-
-  def normalize_ws(X):
-    vals = [w(X) for w in raw_w]
-    stack = jnp.hstack(vals)
-    denom = jnp.sum(stack, axis=1, keepdims=True)
-    denom = jnp.maximum(denom, jnp.array(1e-12, denom.dtype))
-    return [v / denom for v in vals]
-
-  def make_weight_i(i):
-    def wi(X):
-      return normalize_ws(X)[i]
-    return wi
-
-  return [make_weight_i(i) for i in range(4)]
-
-
+# ==========================
+# =======   MAIN   =========
+# ==========================
 def make_trace_fn(u_fn, grad_fn, bounds_xy):
   def g(X, grad_fn_inner=grad_fn, bounds_inner=bounds_xy):
     X = jnp.asarray(X)
@@ -336,30 +318,42 @@ for k in range(max_sweeps):
 
     print(f"  Subdomain {i} solve done.")
 
-elapsed = time.perf_counter() - start
-print(f"Total elapsed time: {elapsed:.3f} s")
+    # -----------------------
+    # Stitch global solution
+    # -----------------------
+    weights = build_pou_weights_rect4(Qs)
 
-# -----------------------
-# Stitch global solution
-# -----------------------
-weights = build_pou_weights_rect4(Qs)
+    def u_global_fn(X):
+      X = jnp.asarray(X).reshape(-1, 2)
+      wvals = [w(X) for w in weights]
+      parts = [wvals[i] * u_fns[i](X) for i in range(4)]
+      return sum(parts)
 
-def u_global_fn(X):
-  X = jnp.asarray(X).reshape(-1, 2)
-  wvals = [w(X) for w in weights]
-  parts = [wvals[i] * u_fns[i](X) for i in range(4)]
-  return sum(parts)
+    # -----------------------
+    # Error & visualization
+    # -----------------------
+    Nx = 200
+    Ny = 200
+    xg = jnp.linspace(bounds[0][0], bounds[0][1], Nx)
+    yg = jnp.linspace(bounds[1][0], bounds[1][1], Ny)
+    Xg, Yg = jnp.meshgrid(xg, yg, indexing="ij")
+    X_flat = jnp.stack([Xg.ravel(), Yg.ravel()], axis=1)
 
-# -----------------------
-# Error & visualization
-# -----------------------
-Nx = 200
-Ny = 200
-xg = jnp.linspace(bounds[0][0], bounds[0][1], Nx)
-yg = jnp.linspace(bounds[1][0], bounds[1][1], Ny)
-Xg, Yg = jnp.meshgrid(xg, yg, indexing="ij")
-X_flat = jnp.stack([Xg.ravel(), Yg.ravel()], axis=1)
+    compare_num_exact_2d(
+      X_flat,
+      u_num_fn=lambda X: u_global_fn(X),
+      u_exact_fn=lambda X: u_exact_fn(X),
+      kind="tri",
+      titles=("Exact", "Numerical", "Abs error"),
+      error_kind="absolute",
+      savepath= images_path / f"{EXPERIMENT}_sweep_{i}.png"
+    )
 
+    elapsed = time.perf_counter() - start
+    print(f"Total elapsed time: {elapsed:.3f} s")
+
+
+# %%
 compare_num_exact_2d(
   X_flat,
   u_num_fn=lambda X: u_global_fn(X),
@@ -367,4 +361,5 @@ compare_num_exact_2d(
   kind="tri",
   titles=("Exact", "Numerical", "Abs error"),
   error_kind="absolute",
+  savepath= images_path / f"{EXPERIMENT}_solution.png"
 )

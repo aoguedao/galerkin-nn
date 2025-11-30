@@ -1,5 +1,9 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
+
+from typing import Tuple, List, Callable
+
 
 def build_pou_weights_1d(Q0, Q1):
   a0, b0 = float(Q0.boundary_x[0,0]), float(Q0.boundary_x[-1,0])
@@ -213,3 +217,85 @@ def build_pou_weights_disk_rect(Q_disk, Q_rect):
     return w1  # (N,1)
 
   return w_disk_fn, w_rect_fn
+
+
+def build_pou_weights_rect4(Qs: Tuple) -> List[Callable[[jax.Array], jax.Array]]:
+  """Cosine-smoothed partition of unity over four overlapping rectangles."""
+  rect_bounds = [Q.meta["bounds"] for Q in Qs]
+
+  # Global bounds & overlap regions inferred from the four rectangles
+  x_min = min(b[0][0] for b in rect_bounds)
+  x_max = max(b[0][1] for b in rect_bounds)
+  y_min = min(b[1][0] for b in rect_bounds)
+  y_max = max(b[1][1] for b in rect_bounds)
+  x_overlap_start = max(b[0][0] for b in rect_bounds)
+  x_overlap_end = min(b[0][1] for b in rect_bounds)
+  y_overlap_start = max(b[1][0] for b in rect_bounds)
+  y_overlap_end = min(b[1][1] for b in rect_bounds)
+
+  overlap_tol = 1e-12
+
+  def cosine_bell(t):
+    return 0.5 * (1.0 + jnp.cos(jnp.pi * t))
+
+  def smooth_drop(coord, start, end):
+    span = max(end - start, overlap_tol)
+    start_arr = jnp.array(start, dtype=coord.dtype)
+    end_arr = jnp.array(end, dtype=coord.dtype)
+    span_arr = jnp.array(span, dtype=coord.dtype)
+    t = jnp.clip((coord - start_arr) / span_arr, 0.0, 1.0)
+    val = cosine_bell(t)
+    return jnp.where(coord <= start_arr, 1.0, jnp.where(coord >= end_arr, 0.0, val))
+
+  def smooth_rise(coord, start, end):
+    span = max(end - start, overlap_tol)
+    start_arr = jnp.array(start, dtype=coord.dtype)
+    end_arr = jnp.array(end, dtype=coord.dtype)
+    span_arr = jnp.array(span, dtype=coord.dtype)
+    t = jnp.clip((coord - start_arr) / span_arr, 0.0, 1.0)
+    val = 1.0 - cosine_bell(t)
+    return jnp.where(coord <= start_arr, 0.0, jnp.where(coord >= end_arr, 1.0, val))
+
+  def weight_fn(bounds_xy):
+    (ax, bx), (ay, by) = bounds_xy
+    is_left = np.isclose(ax, x_min, atol=overlap_tol)
+    is_right = np.isclose(bx, x_max, atol=overlap_tol)
+    is_bottom = np.isclose(ay, y_min, atol=overlap_tol)
+    is_top = np.isclose(by, y_max, atol=overlap_tol)
+
+    def w(X):
+      X = jnp.asarray(X).reshape(-1, 2)
+      x = X[:, 0:1]
+      y = X[:, 1:2]
+      inside = (x >= ax) & (x <= bx) & (y >= ay) & (y <= by)
+      weight = inside.astype(X.dtype)
+
+      if is_left and (not np.isclose(bx, x_max, atol=overlap_tol)):
+        weight = weight * smooth_drop(x, x_overlap_start, x_overlap_end)
+      elif is_right and (not np.isclose(ax, x_min, atol=overlap_tol)):
+        weight = weight * smooth_rise(x, x_overlap_start, x_overlap_end)
+
+      if is_bottom and (not np.isclose(by, y_max, atol=overlap_tol)):
+        weight = weight * smooth_drop(y, y_overlap_start, y_overlap_end)
+      elif is_top and (not np.isclose(ay, y_min, atol=overlap_tol)):
+        weight = weight * smooth_rise(y, y_overlap_start, y_overlap_end)
+
+      return weight
+
+    return w
+
+  raw_w = [weight_fn(b) for b in rect_bounds]
+
+  def normalize_ws(X):
+    vals = [w(X) for w in raw_w]
+    stack = jnp.hstack(vals)
+    denom = jnp.sum(stack, axis=1, keepdims=True)
+    denom = jnp.maximum(denom, jnp.array(1e-12, denom.dtype))
+    return [v / denom for v in vals]
+
+  def make_weight_i(i):
+    def wi(X):
+      return normalize_ws(X)[i]
+    return wi
+
+  return [make_weight_i(i) for i in range(4)]

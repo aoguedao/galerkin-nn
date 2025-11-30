@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
 from matplotlib.tri import Triangulation
 from typing import Callable, Optional, Tuple, Literal, Sequence
 
@@ -198,14 +199,14 @@ def _values_2d(X: jax.Array, u_fn: UFn) -> Tuple[np.ndarray, np.ndarray, np.ndar
   val  = np.asarray(u_fn(X)).reshape(-1)
   return x, y, val
 
-def _scatter_panel(ax, x, y, val, title, cmap="viridis", vmin=None, vmax=None):
-  sc = ax.scatter(x, y, c=val, s=12, cmap=cmap, vmin=vmin, vmax=vmax)
+def _scatter_panel(ax, x, y, val, title, cmap="viridis", vmin=None, vmax=None, norm=None):
+  sc = ax.scatter(x, y, c=val, s=12, cmap=cmap, vmin=vmin, vmax=vmax, norm=norm)
   ax.set_title(title); ax.set_aspect("equal")
   plt.colorbar(sc, ax=ax)
 
-def _tri_panel(ax, x, y, val, title, cmap="viridis", vmin=None, vmax=None):
+def _tri_panel(ax, x, y, val, title, cmap="viridis", vmin=None, vmax=None, norm=None):
   tri = Triangulation(x, y)
-  tpc = ax.tripcolor(tri, val, shading="gouraud", cmap=cmap, vmin=vmin, vmax=vmax)
+  tpc = ax.tripcolor(tri, val, shading="gouraud", cmap=cmap, vmin=vmin, vmax=vmax, norm=norm)
   ax.set_title(title); ax.set_aspect("equal")
   plt.colorbar(tpc, ax=ax)
 
@@ -245,13 +246,21 @@ def compare_num_exact_2d(
 
   vmin = float(np.minimum(ue.min(), un.min()))
   vmax = float(np.maximum(ue.max(), un.max()))
+  err_pos = err[err > 0]
+  tiny = np.finfo(err.dtype).tiny if np.issubdtype(err.dtype, np.floating) else 1e-12
+  log_vmin = float(err_pos.min()) if err_pos.size else tiny
+  log_vmax = float(err.max())
+  if log_vmax <= log_vmin:
+    log_vmax = log_vmin * 10.0
+  log_norm = LogNorm(vmin=log_vmin, vmax=log_vmax)
+  err_disp = np.maximum(err, log_vmin)
 
   panel(ax[0], x, y, ue,  titles[0], cmap="viridis", vmin=vmin, vmax=vmax)
   panel(ax[1], x, y, un,  titles[1], cmap="viridis", vmin=vmin, vmax=vmax)
-  panel(ax[2], x, y, err, titles[2], cmap="RdBu")
+  panel(ax[2], x, y, err_disp, titles[2], cmap="magma", norm=log_norm)
 
   if savepath:
-    fig.savefig(savepath, dpi=150)
+    fig.savefig(savepath, dpi=300, bbox_inches="tight")
   return fig, ax
 
 def plot_numeric_2d(
@@ -288,3 +297,29 @@ def plot_numeric_2d(
 
   ax.set_title(title); ax.set_aspect("equal")
   return fig, ax
+
+
+def relax_fn(new_fn, old_fn, omega_val: float):
+  if omega_val == 1.0:
+    return new_fn
+  return lambda X: (1 - omega_val) * old_fn(X) + omega_val * new_fn(X)
+
+
+def as_coeff_vector(u_coeff):
+  if isinstance(u_coeff, (list, tuple)):
+    return jnp.array([jnp.asarray(c).reshape(-1)[0] for c in u_coeff])
+  c = jnp.asarray(u_coeff)
+  return c.reshape(-1)
+
+
+def make_grad2d(u_fn):
+  """Return grad_u(X) with shape (N,2)."""
+  def scalar_fn(xy):
+    return u_fn(xy.reshape(1, 2))[0, 0]
+  grad_scalar = jax.grad(scalar_fn)
+
+  @jax.jit
+  def grad(X):
+    X = jnp.asarray(X).reshape(-1, 2)
+    return jax.vmap(grad_scalar)(X)
+  return grad

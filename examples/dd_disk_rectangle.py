@@ -33,8 +33,11 @@ Interface Robin is added by DDPDE using eps_interface and trace_fns.
 
 from typing import Callable
 
+import json
 import time
 import numpy as np
+from datetime import datetime
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -47,7 +50,14 @@ from galerkinnn.quadratures import (
   dd_overlapping_disk_rectangle_quadratures,
 )
 from galerkinnn.pou import build_pou_weights_disk_rect
-from galerkinnn.utils import make_u_fn
+from galerkinnn.utils import make_u_fn, as_coeff_vector, make_grad2d, relax_fn
+
+
+EXPERIMENT = "dd_disk_rectangle"
+stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+output_path = Path() / "output" / EXPERIMENT / stamp
+images_path = output_path / "images"
+images_path.mkdir(parents=True, exist_ok=True)
 
 # ----------------------------
 # Parameters
@@ -82,6 +92,31 @@ N = 200  # Init Neurons
 r_width = 100  # Neurons Growth
 A = 5e-2  # Init Learning Rate
 rho = 1.1  # Learning Rate Growth
+max_neurons = 512
+
+config = {
+  "bounds": rect_bounds,
+  "n_r": n_r,
+  "n_theta": n_theta,
+  "nx_rect": nx_rect,
+  "ny_rect": ny_rect,
+  "n_edge_rect": n_edge_rect,
+  "eps_phys": eps_phys,
+  "eps_interface": eps_interface,
+  "kappa": kappa,
+  "max_sweeps": max_sweeps,
+  "omega": omega,
+  "max_bases": [max_bases_0, max_bases_1],
+  "max_epoch_basis": max_epoch_basis,
+  "seeds": [seed0, seed1],
+  "N": N,
+  "r_width": r_width,
+  "A": A,
+  "rho": rho,
+  "neuron_cap": max_neurons
+}
+(output_path / "config.json").write_text(json.dumps(config, indent=2))
+print(config)
 
 # ----------------------------
 # Network
@@ -100,38 +135,13 @@ def activations_fn(i: int):
 
 
 # network_widths_fn = lambda i: int(min(N * (r_width ** (i - 1)), 1024))
-network_widths_fn = lambda i: int(min(N + r_width * int((i - 1) / 2), 1024))
+network_widths_fn = lambda i: int(min(N + r_width * int((i - 1) / 2), max_neurons))
 learning_rates_fn = lambda i: A * (rho ** (-(i - 1)))
 
 
 # ----------------------------
 # Helpers
 # ----------------------------
-def as_coeff_vector(u_coeff):
-  if isinstance(u_coeff, (list, tuple)):
-    return jnp.array([jnp.asarray(c).reshape(-1)[0] for c in u_coeff])
-  c = jnp.asarray(u_coeff)
-  return c.reshape(-1)
-
-
-def make_grad2d(u_fn):
-  def scalar_fn(xy):
-    return u_fn(xy.reshape(1, 2))[0, 0]
-  grad_scalar = jax.grad(scalar_fn)
-
-  @jax.jit
-  def grad(X):
-    X = jnp.asarray(X).reshape(-1, 2)
-    return jax.vmap(grad_scalar)(X)
-  return grad
-
-
-def relax_fn(new_fn, old_fn, omega: float):
-  if omega == 1.0:
-    return new_fn
-  return lambda X: (1 - omega) * old_fn(X) + omega * new_fn(X)
-
-
 def radial_normal(X: jax.Array) -> jax.Array:
   X = jnp.asarray(X).reshape(-1, 2)
   r = jnp.sqrt(jnp.sum(X ** 2, axis=1, keepdims=True))
@@ -546,3 +556,24 @@ fig.colorbar(tpc_err, ax=axs[1], shrink=0.85, label="abs error")
 
 plt.tight_layout()
 plt.show()
+# %%
+fig, axs = plt.subplots(1, 2, figsize=(11, 4.5))
+
+tpc = axs[0].tripcolor(tri, u_num_q, shading="gouraud", cmap="viridis")
+axs[0].set_aspect("equal", adjustable="box")
+axs[0].set_title("u_h (triangulated PoU blend)")
+fig.colorbar(tpc, ax=axs[0], shrink=0.85, label="u_h")
+
+tpc_err = axs[1].tripcolor(tri, np.abs(err_q), shading="gouraud", cmap="magma_r")
+axs[1].set_aspect("equal", adjustable="box")
+axs[1].set_title("|u_h - u_exact|")
+fig.colorbar(tpc_err, ax=axs[1], shrink=0.85, label="abs error")
+
+plt.tight_layout()
+for fmt, dpi in (("png", 300), ("pdf", None)):
+  savepath = images_path / f"{EXPERIMENT}_solution.{fmt}"
+  save_kwargs = {"bbox_inches": "tight", "transparent": True}
+  if dpi is not None:
+    save_kwargs["dpi"] = dpi
+  fig.savefig(savepath, **save_kwargs)
+plt.close(fig)
